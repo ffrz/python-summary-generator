@@ -109,6 +109,13 @@ class ExcelWorker(QThread):
     def run(self):
         self.status_updated.emit("⚡ Auto-Scanning...")
         all_files = [f for f in os.listdir(self.folder_path) if f.lower().endswith('.xls')]
+
+        max_demo_files = 5
+        if len(all_files) > max_demo_files:
+             all_files = all_files[:max_demo_files]
+             self.status_updated.emit(f"⚠️ DEMO MODE: Memproses hanya {max_demo_files} file pertama.")
+             time.sleep(1) # Biar user sempat baca statusnya
+
         total_files = len(all_files)
         
         if total_files == 0:
@@ -468,9 +475,30 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.lbl_status.setText(f"Error Save: {e}")
 
+    def check_license_validity(self):
+        QMessageBox.warning(self, "DEMO WARNING", 
+                        "Masa uji coba hanya bisa memproses 5 file dalam satu direktori.\n"
+                        "Silakan hubungi developer untuk lisensi penuh.\n\n"
+                        "Whatsapp: 0853-1740-4760")
+        return
+            
+        # SETTING TANGGAL KADALUARSA (Tahun, Bulan, Tanggal)
+        # Misal: Trial hanya berlaku sampai 30 Juni 2025
+        expiry_date = datetime(2025, 12, 14) 
+        current_date = datetime.now()
+
+        if current_date > expiry_date:
+            QMessageBox.critical(self, "Trial Expired", 
+                                 "Masa uji coba (Trial) aplikasi ini telah berakhir.\n"
+                                 "Silakan hubungi developer untuk lisensi penuh.\n\n"
+                                 "Whatsapp: 0853-1740-4760")
+            sys.exit() # Matikan aplikasi seketika
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     window = MainWindow()
+    window.check_license_validity()
     window.show()
+
     sys.exit(app.exec())
