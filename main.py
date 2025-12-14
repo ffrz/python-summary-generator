@@ -1,38 +1,27 @@
 import sys
 import os
 import re
+import shutil
 import xlrd
+import openpyxl
 from datetime import datetime
-import time
-
-# Library Watchdog
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QLabel, QProgressBar, 
-                               QTableWidget, QTableWidgetItem, QFileDialog, QMessageBox, QHeaderView, QCheckBox)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+                               QTableWidget, QTableWidgetItem, QFileDialog, 
+                               QMessageBox, QHeaderView, QAbstractItemView)
+from PySide6.QtCore import Qt, QThread, Signal, QSettings, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QAction
 
 # ==========================================
-# BAGIAN 1: HELPER & PARSER
+# 1. HELPER FUNCTIONS
 # ==========================================
 
-def addr_to_idx(address):
-    match = re.match(r"([A-Z]+)([0-9]+)", address.upper())
-    if not match: raise ValueError(f"Bad Addr: {address}")
-    col_str, row_str = match.groups()
-    row_idx = int(row_str) - 1
-    col_idx = 0
-    for char in col_str:
-        col_idx = col_idx * 26 + (ord(char) - ord('A') + 1)
-    return row_idx, col_idx - 1
-
-def get_val(sheet, address):
-    try:
-        r, c = addr_to_idx(address)
-        return sheet.cell_value(r, c)
-    except: return None 
+def sanitize_filename(name):
+    """Membersihkan karakter ilegal untuk nama file"""
+    if not name: return "Unknown"
+    clean = re.sub(r'[\\/*?:"<>|]', "", str(name)).strip()
+    return clean if clean else "Unknown"
 
 def clean_currency(value):
     if value in [None, ""]: return 0
@@ -41,464 +30,535 @@ def clean_currency(value):
     try: return float(str_val)
     except: return 0
 
-def format_excel_date(value, workbook):
-    if value is None or value == "": return ""
+def extract_year_from_date(date_str):
     try:
-        if isinstance(value, float):
-            date_tuple = xlrd.xldate_as_tuple(value, workbook.datemode)
-            return datetime(*date_tuple).strftime("%d-%b-%y")
-        return str(value)
-    except: return str(value)
+        if not date_str: return str(datetime.now().year)
+        parts = date_str.split('-')
+        if len(parts) == 3:
+            yy = parts[2]
+            return f"20{yy}" if len(yy) == 2 else yy
+    except:
+        pass
+    return str(datetime.now().year)
 
-def extract_one_file(filepath):
+# --- PARSER KHUSUS .XLS (XLRD) ---
+def parse_xls_classic(filepath):
     try:
-        wb = xlrd.open_workbook(filepath, formatting_info=False) 
-        sheet = wb.sheet_by_index(0) 
-
-        exchange_rate = get_val(sheet, "B4")
-        date_updated = get_val(sheet, "B3")
-        proj_value = get_val(sheet, "B5") 
-        cust_name  = get_val(sheet, "K3") 
-        project_no = get_val(sheet, "K4") 
-        formatted_date = format_excel_date(date_updated, wb)
-
-        sub_total = 0
-        warranty = 0
-        cm_booked = 0
-        cr_booked = 0
-        penalty = 0
-        total_cost = 0
+        wb = xlrd.open_workbook(filepath, formatting_info=False)
+        sheet = wb.sheet_by_index(0)
         
+        def get_xls_val(addr):
+            match = re.match(r"([A-Z]+)([0-9]+)", addr.upper())
+            if not match: return None
+            col_str, row_str = match.groups()
+            row = int(row_str) - 1
+            col = 0
+            for char in col_str:
+                col = col * 26 + (ord(char) - ord('A') + 1)
+            col -= 1
+            try: return sheet.cell_value(row, col)
+            except: return None
+
+        def get_xls_date_pack(addr):
+            val = get_xls_val(addr)
+            if isinstance(val, float):
+                try:
+                    dt_tuple = xlrd.xldate_as_tuple(val, wb.datemode)
+                    dt_obj = datetime(*dt_tuple)
+                    return dt_obj.strftime("%d-%b-%y"), dt_obj
+                except: pass
+            return str(val), datetime.min
+
+        date_str, date_obj = get_xls_date_pack("B3")
+        sub_total = 0; penalty = 0; warranty = 0; total_cost = 0; cm_booked = 0; cr_booked = 0
         limit = min(sheet.nrows, 150)
-        for r in range(9, limit): 
+        
+        for r in range(9, limit):
             try:
-                raw_val = sheet.cell_value(r, 0)
-                cell_text = str(raw_val).upper() if raw_val else ""
+                raw = sheet.cell_value(r, 0)
+                txt = str(raw).upper() if raw else ""
             except: continue
             
-            if sub_total == 0 and "SUB TOTAL" in cell_text: sub_total = sheet.cell_value(r, 4) 
-            elif penalty == 0 and "PENALTY" in cell_text: penalty = sheet.cell_value(r, 4)
-            elif warranty == 0 and "WARRANTTY" in cell_text: warranty = sheet.cell_value(r, 4)
-            elif total_cost == 0 and "TOTAL COST" in cell_text: total_cost = sheet.cell_value(r, 4)
-            elif cm_booked == 0 and "CM BOOKED" in cell_text: cm_booked = sheet.cell_value(r, 4)
-            elif cr_booked == 0 and "CR BOOKED" in cell_text: cr_booked = sheet.cell_value(r, 4)
+            if "SUB TOTAL" in txt and sub_total == 0: sub_total = sheet.cell_value(r, 4)
+            elif "PENALTY" in txt and penalty == 0: penalty = sheet.cell_value(r, 4)
+            elif "WARRANTTY" in txt and warranty == 0: warranty = sheet.cell_value(r, 4)
+            elif "TOTAL COST" in txt and total_cost == 0: total_cost = sheet.cell_value(r, 4)
+            elif "CM BOOKED" in txt and cm_booked == 0: cm_booked = sheet.cell_value(r, 4)
+            elif "CR BOOKED" in txt and cr_booked == 0: cr_booked = sheet.cell_value(r, 4)
 
         return {
-            "status": "OK", "Project No": project_no, "Cust Name": cust_name, "Proj Date": formatted_date,
-            "Kurs": clean_currency(exchange_rate), "Project Value": clean_currency(proj_value),
-            "Sub Total": clean_currency(sub_total), "Penalty": clean_currency(penalty),
-            "Warranty": clean_currency(warranty), "Total Cost": clean_currency(total_cost),
-            "CM Booked": clean_currency(cm_booked), "CR Booked": clean_currency(cr_booked)
+            "status": "OK",
+            "_sort_date": date_obj,
+            "Project No": get_xls_val("K4"),
+            "Cust Name": get_xls_val("K3"),
+            "Proj Date": date_str,
+            "Kurs": clean_currency(get_xls_val("B4")),
+            "Project Value": clean_currency(get_xls_val("B5")),
+            "Sub Total": clean_currency(sub_total),
+            "Penalty": clean_currency(penalty),
+            "Warranty": clean_currency(warranty),
+            "Total Cost": clean_currency(total_cost),
+            "CM Booked": clean_currency(cm_booked),
+            "CR Booked": clean_currency(cr_booked)
         }
     except Exception as e:
-        return {"status": "ERROR", "msg": str(e), "file": os.path.basename(filepath)}
+        return {"status": "ERROR", "msg": str(e), "_sort_date": datetime.min}
 
-# ==========================================
-# BAGIAN 2: WORKER & WATCHER
-# ==========================================
-
-class ExcelWorker(QThread):
-    progress_updated = Signal(int)
-    status_updated = Signal(str)
-    finished_data = Signal(list)
-
-    def __init__(self, folder_path):
-        super().__init__()
-        self.folder_path = folder_path
-
-    def run(self):
-        self.status_updated.emit("⚡ Auto-Scanning...")
-        all_files = [f for f in os.listdir(self.folder_path) if f.lower().endswith('.xls')]
-
-        max_demo_files = 5
-        if len(all_files) > max_demo_files:
-             all_files = all_files[:max_demo_files]
-             self.status_updated.emit(f"⚠️ DEMO MODE: Memproses hanya {max_demo_files} file pertama.")
-             time.sleep(1) # Biar user sempat baca statusnya
-
-        total_files = len(all_files)
+# --- PARSER KHUSUS .XLSX (OPENPYXL) ---
+def parse_xlsx_modern(filepath):
+    try:
+        wb = openpyxl.load_workbook(filepath, data_only=True)
+        sheet = wb.active
         
-        if total_files == 0:
-            self.status_updated.emit("Folder kosong (tidak ada .xls)")
-            self.finished_data.emit([])
-            return
+        def get_xlsx_val(addr):
+            return sheet[addr].value
 
-        summary_data = []
-        for i, filename in enumerate(all_files):
-            if self.isInterruptionRequested(): break
+        def get_xlsx_date_pack(addr):
+            val = sheet[addr].value
+            if isinstance(val, datetime):
+                return val.strftime("%d-%b-%y"), val
+            return str(val) if val else "", datetime.min
+
+        date_str, date_obj = get_xlsx_date_pack("B3")
+        sub_total = 0; penalty = 0; warranty = 0; total_cost = 0; cm_booked = 0; cr_booked = 0
+        limit = min(sheet.max_row, 150)
+        
+        for r in range(10, limit + 1):
+            try:
+                cell_val = sheet.cell(row=r, column=1).value
+                txt = str(cell_val).upper() if cell_val else ""
+            except: continue
             
-            full_path = os.path.join(self.folder_path, filename)
-            data = extract_one_file(full_path)
-            if data["status"] == "OK": summary_data.append(data)
-            
-            progress = int((i + 1) / total_files * 100)
-            self.progress_updated.emit(progress)
+            val_col = 5
+            if "SUB TOTAL" in txt and sub_total == 0: sub_total = sheet.cell(row=r, column=val_col).value
+            elif "PENALTY" in txt and penalty == 0: penalty = sheet.cell(row=r, column=val_col).value
+            elif "WARRANTY" in txt and warranty == 0: warranty = sheet.cell(row=r, column=val_col).value
+            elif "TOTAL COST" in txt and total_cost == 0: total_cost = sheet.cell(row=r, column=val_col).value
+            elif "CM BOOKED" in txt and cm_booked == 0: cm_booked = sheet.cell(row=r, column=val_col).value
+            elif "CR BOOKED" in txt and cr_booked == 0: cr_booked = sheet.cell(row=r, column=val_col).value
 
-        self.finished_data.emit(summary_data)
+        return {
+            "status": "OK",
+            "_sort_date": date_obj,
+            "Project No": get_xlsx_val("K4"),
+            "Cust Name": get_xlsx_val("K3"),
+            "Proj Date": date_str,
+            "Kurs": clean_currency(get_xlsx_val("B4")),
+            "Project Value": clean_currency(get_xlsx_val("B5")),
+            "Sub Total": clean_currency(sub_total),
+            "Penalty": clean_currency(penalty),
+            "Warranty": clean_currency(warranty),
+            "Total Cost": clean_currency(total_cost),
+            "CM Booked": clean_currency(cm_booked),
+            "CR Booked": clean_currency(cr_booked)
+        }
 
-class FolderChangeHandler(FileSystemEventHandler):
-    def __init__(self, signal_emitter):
-        self.signal_emitter = signal_emitter
+    except Exception as e:
+        return {"status": "ERROR", "msg": str(e), "_sort_date": datetime.min}
 
-    def on_any_event(self, event):
-        if event.is_directory: return
-        if not event.src_path.lower().endswith('.xls'): return
-        self.signal_emitter.emit()
+def extract_dispatcher(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    data = {}
+    
+    if ext == ".xls":
+        data = parse_xls_classic(filepath)
+    elif ext == ".xlsx":
+        data = parse_xlsx_modern(filepath)
+    else:
+        return {"status": "SKIP", "msg": "Format tidak didukung", "_sort_date": datetime.min}
+    
+    if data["status"] == "OK":
+        if not data.get("Project No"):
+            data["status"] = "PARSING ERROR"
+            data["msg"] = "Project No Kosong"
+    
+    return data
 
-class WatcherThread(QThread):
-    folder_changed = Signal()
+# ==========================================
+# 2. WORKER THREAD (PREVIEW SCANNER + SORT + DEDUP)
+# ==========================================
 
+class PreviewWorker(QThread):
+    progress = Signal(int)
+    finished = Signal(list)
+    
     def __init__(self, folder_path):
         super().__init__()
         self.folder_path = folder_path
-        self.observer = Observer()
-
+        
     def run(self):
-        event_handler = FolderChangeHandler(self.folder_changed)
-        self.observer.schedule(event_handler, self.folder_path, recursive=False)
-        self.observer.start()
         try:
-            while not self.isInterruptionRequested():
-                self.msleep(500)
-        finally:
-            self.observer.stop()
-            self.observer.join()
+            all_files = [f for f in os.listdir(self.folder_path) if f.lower().endswith(('.xls', '.xlsx'))]
+            all_files = [f for f in all_files if not f.startswith("~$")]
+        except:
+            all_files = []
+        
+        total = len(all_files)
+        results = []
+        
+        # 1. PARSE SEMUA FILE
+        for i, filename in enumerate(all_files):
+            path = os.path.join(self.folder_path, filename)
+            data = extract_dispatcher(path)
+            data["filename"] = filename
+            data["path"] = path
+            results.append(data)
+            if total > 0: self.progress.emit(int((i+1)/total * 100))
 
-    def stop(self):
-        self.requestInterruption()
+        # 2. LOGIKA DUPLIKAT
+        id_counts = {}
+        for item in results:
+            if item["status"] == "OK":
+                pid = str(item.get("Project No", "")).strip()
+                if pid:
+                    id_counts[pid] = id_counts.get(pid, 0) + 1
+        
+        for item in results:
+            if item["status"] == "OK":
+                pid = str(item.get("Project No", "")).strip()
+                if pid and id_counts.get(pid, 0) > 1:
+                    item["status"] = "DUPLIKAT" 
+        
+        # 3. SORTING BY DATE
+        results.sort(key=lambda x: x.get("_sort_date", datetime.min))
+        self.finished.emit(results)
 
 # ==========================================
-# BAGIAN 3: MAIN WINDOW
+# 3. GENERATOR THREAD
+# ==========================================
+
+class GeneratorWorker(QThread):
+    log_msg = Signal(str)
+    finished = Signal(str)
+    
+    def __init__(self, data_list, output_folder):
+        super().__init__()
+        self.data_list = data_list
+        self.output_folder = output_folder
+        
+    def run(self):
+        self.log_msg.emit("🚀 Memulai proses generate...")
+        
+        valid_data = [d for d in self.data_list if d["status"] in ["OK", "DUPLIKAT"]]
+        copied_count = 0
+        created_paths = set()
+        
+        # 1. COPY & RENAME FILES
+        for item in valid_data:
+            try:
+                old_path = item["path"]
+                ext = os.path.splitext(old_path)[1]
+                p_id = sanitize_filename(item['Project No'])
+                cust = sanitize_filename(item['Cust Name'])
+                year = extract_year_from_date(item.get('Proj Date'))
+                
+                base_name = f"PCM {p_id} {year} {cust}"
+                new_name = f"{base_name}{ext}"
+                new_path = os.path.join(self.output_folder, new_name)
+                
+                counter = 1
+                while new_path in created_paths or os.path.exists(new_path) and new_path not in created_paths:
+                    if new_path not in created_paths: break
+                    new_name = f"{base_name} ({counter}){ext}"
+                    new_path = os.path.join(self.output_folder, new_name)
+                    counter += 1
+
+                created_paths.add(new_path)
+                shutil.copy2(old_path, new_path)
+                copied_count += 1
+                
+            except Exception as e:
+                self.log_msg.emit(f"❌ Gagal copy {item['filename']}: {e}")
+
+        self.log_msg.emit(f"✅ Berhasil menyalin {copied_count} file.")
+
+        # 2. GENERATE SUMMARY EXCEL
+        try:
+            self.log_msg.emit("📊 Membuat file summary...")
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "PCM SUMMARY"
+            
+            headers = ["No", "Project No", "Proj Date", "Cust Name", "Project Value", 
+                       "Kurs", "BARANG&JASA", "Penalty", "Warranty", "Total Cost", 
+                       "CM Booked", "CR Booked", "CM IDR", "CM %", "Status File"]
+            
+            # Styles
+            header_font = openpyxl.styles.Font(bold=True, color="FFFFFF")
+            header_fill = openpyxl.styles.PatternFill("solid", fgColor="2196F3")
+            
+            # --- COLOR MARKING UNTUK OUTPUT (KUNING) ---
+            duplicate_fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00") # Kuning
+            
+            border = openpyxl.styles.Border(left=openpyxl.styles.Side(style='thin'), 
+                                            right=openpyxl.styles.Side(style='thin'), 
+                                            top=openpyxl.styles.Side(style='thin'), 
+                                            bottom=openpyxl.styles.Side(style='thin'))
+
+            ws.append(headers)
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = openpyxl.styles.Alignment(horizontal='center')
+            
+            for idx, item in enumerate(valid_data, 1):
+                row = idx + 1
+                f_cm_idr = f"=E{row}-J{row}"
+                f_cm_pct = f"=IF(E{row}=0, 0, M{row}/E{row})"
+                
+                file_status = "COPIED"
+                if item["status"] == "DUPLIKAT":
+                    file_status = "DUPLICATE INPUT"
+
+                row_data = [
+                    idx, item["Project No"], item["Proj Date"], item["Cust Name"], item["Project Value"],
+                    "IDR", item["Sub Total"], item["Penalty"], item["Warranty"], item["Total Cost"],
+                    item["CM Booked"], item["CR Booked"], f_cm_idr, f_cm_pct, file_status
+                ]
+                ws.append(row_data)
+                
+                for c, val in enumerate(row_data, 1):
+                    cell = ws.cell(row=row, column=c)
+                    cell.border = border
+                    if c in [5, 7, 8, 9, 10, 11, 12, 13]: cell.number_format = '#,##0'
+                    if c == 14: cell.number_format = '0.00%'
+                    
+                    # --- APPLY WARNA KUNING JIKA DUPLIKAT ---
+                    if item["status"] == "DUPLIKAT":
+                        cell.fill = duplicate_fill
+
+            current_year = datetime.now().year
+            summary_name = f"PCM SUMMARY {current_year}.xlsx"
+            summary_path = os.path.join(self.output_folder, summary_name)
+            
+            wb.save(summary_path)
+            self.finished.emit(summary_path) # Return path summary
+
+        except Exception as e:
+            self.finished.emit(f"ERROR: {e}")
+
+# ==========================================
+# 4. MAIN WINDOW
 # ==========================================
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PCM Generator 2025 - Auto Sync 🔄")
-        self.resize(1100, 700)
-
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-
-        # --- HEADER ---
-        header_layout = QHBoxLayout()
-        self.lbl_path = QLabel("Pilih folder input...")
-        self.lbl_path.setStyleSheet("border: 1px solid #ccc; padding: 5px; background: #f0f0f0;")
-        self.btn_browse = QPushButton("📁 1. Pilih Folder Input")
-        header_layout.addWidget(self.lbl_path)
-        header_layout.addWidget(self.btn_browse)
-        layout.addLayout(header_layout)
-
-        # --- TARGET FILE SELECTION ---
-        target_layout = QHBoxLayout()
-        self.lbl_target = QLabel("File Summary Target: Belum dipilih")
-        self.lbl_target.setStyleSheet("border: 1px solid #ccc; padding: 5px; background: #fffde7;")
-        self.btn_target = QPushButton("📄 2. Pilih File Summary")
-        target_layout.addWidget(self.lbl_target)
-        target_layout.addWidget(self.btn_target)
-        layout.addLayout(target_layout)
-
-        # --- CONTROLS ---
-        ctrl_layout = QHBoxLayout()
+        self.setWindowTitle("PCM Generator v1.0.0")
+        self.resize(1000, 650)
         
-        self.chk_auto_scan = QCheckBox("Auto-Scan Input")
-        self.chk_auto_scan.setChecked(True)
-        self.chk_auto_scan.setStyleSheet("color: #2196F3; font-weight: bold;")
-
-        self.chk_auto_save = QCheckBox("Auto-Save to Excel")
-        self.chk_auto_save.setChecked(False) 
-        self.chk_auto_save.setStyleSheet("color: #4CAF50; font-weight: bold;")
-        self.chk_auto_save.setEnabled(False) 
-
-        self.btn_force_scan = QPushButton("🔄 Force Refresh")
-        self.btn_manual_save = QPushButton("💾 Manual Save")
-        self.btn_manual_save.setEnabled(False)
-
-        ctrl_layout.addWidget(self.chk_auto_scan)
-        ctrl_layout.addWidget(self.chk_auto_save)
-        ctrl_layout.addWidget(self.btn_force_scan)
-        ctrl_layout.addWidget(self.btn_manual_save)
-        layout.addLayout(ctrl_layout)
-
-        # --- STATUS & PROGRESS ---
-        self.lbl_status = QLabel("Idle")
-        self.lbl_status.setStyleSheet("font-size: 14px; padding: 5px;")
-        self.progress_bar = QProgressBar()
-        layout.addWidget(self.lbl_status)
-        layout.addWidget(self.progress_bar)
-
+        # Registry Settings (Untuk ingat folder terakhir)
+        self.settings = QSettings("FahmiSoft", "PCMGenerator")
+        
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        
+        # --- INPUT OUTPUT SELECTION ---
+        grp_io = QWidget()
+        layout_io = QVBoxLayout(grp_io)
+        
+        h1 = QHBoxLayout()
+        self.lbl_input = QLabel("Input Folder: (Belum Dipilih)")
+        self.lbl_input.setStyleSheet("background: #e3f2fd; padding: 5px; border-radius: 4px;")
+        btn_input = QPushButton("1. Pilih Folder INPUT")
+        btn_input.clicked.connect(self.select_input)
+        h1.addWidget(self.lbl_input); h1.addWidget(btn_input)
+        
+        h2 = QHBoxLayout()
+        self.lbl_output = QLabel("Output Folder: (Belum Dipilih)")
+        self.lbl_output.setStyleSheet("background: #e8f5e9; padding: 5px; border-radius: 4px;")
+        btn_output = QPushButton("2. Pilih Folder OUTPUT")
+        btn_output.clicked.connect(self.select_output)
+        h2.addWidget(self.lbl_output); h2.addWidget(btn_output)
+        
+        layout_io.addLayout(h1); layout_io.addLayout(h2)
+        layout.addWidget(grp_io)
+        
         # --- TABLE ---
         self.table = QTableWidget()
-        self.columns = ["Project No", "Proj Date", "Cust Name", "Project Value", "Kurs", 
-                   "BARANG&JASA", "Penalty", "Warranty", "Cost (estd)", 
-                   "CM Booked", "CR Booked", "CM %", "Ket"]
-        self.table.setColumnCount(len(self.columns))
-        self.table.setHorizontalHeaderLabels(self.columns)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        cols = ["Nama File Asli", "Project ID", "Customer", "Date", "Nilai Project", "Status"]
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.table)
-
-        # --- SYSTEM VARS ---
-        self.selected_folder = ""
-        self.target_file = "" 
-        self.all_data = [] 
-        self.worker = None
-        self.watcher_thread = None
         
-        self.debounce_timer = QTimer()
-        self.debounce_timer.setSingleShot(True)
-        self.debounce_timer.setInterval(1500) 
+        # --- ACTION ---
+        h3 = QHBoxLayout()
+        self.progress = QProgressBar()
+        self.btn_gen = QPushButton("3. GENERATE FILES")
+        self.btn_gen.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; padding: 10px; } QPushButton:disabled { background-color: #ccc; }")
+        self.btn_gen.setEnabled(False)
+        self.btn_gen.clicked.connect(self.start_generation)
+        h3.addWidget(self.progress); h3.addWidget(self.btn_gen)
+        layout.addLayout(h3)
+        
+        # --- STATUS BAR (NEW) ---
+        self.setup_statusbar()
+        
+        self.input_dir = ""; self.output_dir = ""; self.data_cache = []
+        self.scan_worker = None; self.gen_worker = None
 
-        # --- SIGNALS ---
-        self.btn_browse.clicked.connect(self.select_folder)
-        self.btn_target.clicked.connect(self.select_target_file)
-        self.btn_force_scan.clicked.connect(self.trigger_scan)
-        self.btn_manual_save.clicked.connect(lambda: self.save_to_legacy_xls(silent=False))
-        self.debounce_timer.timeout.connect(self.trigger_scan)
+        # Load Last Settings
+        self.load_settings()
 
-    def select_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Pilih Folder Input")
-        if folder:
-            self.selected_folder = folder
-            self.lbl_path.setText(folder)
-            self.trigger_scan()
-            self.start_watcher()
+    def setup_statusbar(self):
+        status_bar = self.statusBar()
+        
+        # Kiri: Versi
+        lbl_version = QLabel("  PCM Summary Generator v. 1.0.0  ")
+        status_bar.addWidget(lbl_version)
+        
+        # Kanan: About
+        btn_about = QPushButton("About Application")
+        btn_about.setFlat(True)
+        btn_about.setStyleSheet("font-weight: bold; color: #555;")
+        btn_about.clicked.connect(self.show_about_dialog)
+        status_bar.addPermanentWidget(btn_about)
 
-    def select_target_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Pilih File Summary Master", "", "Excel Files (*.xls)")
-        if file_path:
-            self.target_file = file_path
-            self.lbl_target.setText(f"Target: {os.path.basename(file_path)}")
-            self.chk_auto_save.setEnabled(True)
-            self.chk_auto_save.setChecked(True) 
-            self.btn_manual_save.setEnabled(True)
+    def load_settings(self):
+        # Restore last input/output folder
+        last_in = self.settings.value("last_input_dir")
+        last_out = self.settings.value("last_output_dir")
+        
+        if last_in and os.path.exists(last_in):
+            self.input_dir = last_in
+            self.lbl_input.setText(last_in)
+            self.run_preview_scan() # Auto scan jika ada history
+            
+        if last_out and os.path.exists(last_out):
+            self.output_dir = last_out
+            self.lbl_output.setText(last_out)
+            self.check_ready()
 
-    def start_watcher(self):
-        if self.watcher_thread and self.watcher_thread.isRunning():
-            self.watcher_thread.stop()
-            self.watcher_thread.wait()
+    def select_input(self):
+        start_dir = self.input_dir if self.input_dir else ""
+        path = QFileDialog.getExistingDirectory(self, "Pilih Input Folder", start_dir)
+        if path:
+            self.input_dir = path
+            self.lbl_input.setText(path)
+            self.settings.setValue("last_input_dir", path) # Save setting
+            self.run_preview_scan()
 
-        self.watcher_thread = WatcherThread(self.selected_folder)
-        self.watcher_thread.folder_changed.connect(self.on_folder_changed)
-        self.watcher_thread.start()
-        self.lbl_status.setText("👁️ Monitoring Active")
+    def select_output(self):
+        start_dir = self.output_dir if self.output_dir else ""
+        path = QFileDialog.getExistingDirectory(self, "Pilih Output Folder", start_dir)
+        if path:
+            self.output_dir = path
+            self.lbl_output.setText(path)
+            self.settings.setValue("last_output_dir", path) # Save setting
+            self.check_ready()
 
-    def on_folder_changed(self):
-        if self.chk_auto_scan.isChecked():
-            self.lbl_status.setText("⏳ Detected change... Waiting...")
-            self.lbl_status.setStyleSheet("color: orange; font-weight: bold;")
-            self.debounce_timer.start() 
-
-    def trigger_scan(self):
-        if not self.selected_folder: return
-        if self.worker and self.worker.isRunning(): return 
-
+    def run_preview_scan(self):
         self.table.setRowCount(0)
-        self.progress_bar.setValue(0)
-        self.lbl_status.setStyleSheet("color: black;")
+        self.btn_gen.setEnabled(False)
+        self.scan_worker = PreviewWorker(self.input_dir)
+        self.scan_worker.progress.connect(self.progress.setValue)
+        self.scan_worker.finished.connect(self.on_preview_done)
+        self.scan_worker.start()
         
-        self.worker = ExcelWorker(self.selected_folder)
-        self.worker.progress_updated.connect(self.progress_bar.setValue)
-        self.worker.status_updated.connect(self.lbl_status.setText)
-        self.worker.finished_data.connect(self.populate_table)
-        self.worker.finished.connect(self.on_scan_finished)
-        self.worker.start()
+    def on_preview_done(self, results):
+        self.data_cache = results
+        self.table.setRowCount(len(results))
+        for r, item in enumerate(results):
+            status = item["status"]
+            color = QColor(Qt.black)
+            bg_color = QColor(Qt.white)
+            
+            if status == "DUPLIKAT":
+                bg_color = QColor("#FFEB3B"); status = "DUPLIKAT (Diproses)"
+            elif status != "OK":
+                bg_color = QColor("#FFCDD2"); color = QColor(Qt.red)
+            
+            def make_item(text):
+                it = QTableWidgetItem(str(text))
+                it.setForeground(color); it.setBackground(bg_color)
+                return it
 
-    def populate_table(self, data_list):
-        self.all_data = data_list 
-        self.table.setRowCount(len(data_list))
+            self.table.setItem(r, 0, make_item(item["filename"]))
+            self.table.setItem(r, 1, make_item(item.get("Project No", "-")))
+            self.table.setItem(r, 2, make_item(item.get("Cust Name", "-")))
+            self.table.setItem(r, 3, make_item(item.get("Proj Date", "-")))
+            val = item.get("Project Value", 0)
+            fmt_val = f"{val:,.0f}" if isinstance(val, (int, float)) else str(val)
+            self.table.setItem(r, 4, make_item(fmt_val))
+            self.table.setItem(r, 5, make_item(status))
         
-        for row, item in enumerate(data_list):
-            proj_val = item.get("Project Value", 0)
-            cm_val = item.get("CM Booked", 0)
-            cm_percent = 0
-            if proj_val > 0: cm_percent = (cm_val / proj_val) * 100
-            item["CM %"] = f"{cm_percent:.2f}%"
+        self.check_ready()
 
-            def fmt(val): return "{:,.0f}".format(val).replace(",", ".") if isinstance(val, (int, float)) else val
+    def check_ready(self):
+        valid_count = sum(1 for d in self.data_cache if d["status"] in ["OK", "DUPLIKAT"])
+        is_ready = bool(self.input_dir and self.output_dir and valid_count > 0)
+        self.btn_gen.setEnabled(is_ready)
+        if is_ready: self.btn_gen.setText(f"3. GENERATE ({valid_count} File Valid)")
+        else: self.btn_gen.setText("3. GENERATE (Menunggu Input/Output)")
 
-            self.table.setItem(row, 0, QTableWidgetItem(str(item.get("Project No"))))
-            self.table.setItem(row, 1, QTableWidgetItem(str(item.get("Proj Date"))))
-            self.table.setItem(row, 2, QTableWidgetItem(str(item.get("Cust Name"))))
-            self.table.setItem(row, 3, QTableWidgetItem(fmt(item.get("Project Value"))))
-            self.table.setItem(row, 4, QTableWidgetItem(fmt(item.get("Kurs"))))
-            self.table.setItem(row, 5, QTableWidgetItem(fmt(item.get("Sub Total"))))
-            self.table.setItem(row, 6, QTableWidgetItem(fmt(item.get("Penalty"))))
-            self.table.setItem(row, 7, QTableWidgetItem(fmt(item.get("Warranty"))))
-            self.table.setItem(row, 8, QTableWidgetItem(fmt(item.get("Total Cost"))))
-            self.table.setItem(row, 9, QTableWidgetItem(fmt(item.get("CM Booked"))))
-            self.table.setItem(row, 10, QTableWidgetItem(fmt(item.get("CR Booked"))))
-            self.table.setItem(row, 11, QTableWidgetItem(item["CM %"]))
-            self.table.setItem(row, 12, QTableWidgetItem(""))
+    def start_generation(self):
+        if not self.output_dir: return
 
-    def on_scan_finished(self):
-        if self.chk_auto_save.isChecked() and self.target_file:
-            self.save_to_legacy_xls(silent=True) 
+        try:
+            files_in_output = [f for f in os.listdir(self.output_dir) if not f.startswith('.')]
+            if files_in_output:
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Warning)
+                msg_box.setWindowTitle("Folder Output Tidak Kosong")
+                msg_box.setText(f"Folder Output berisi {len(files_in_output)} file/folder.")
+                msg_box.setInformativeText("File lama mungkin akan tertimpa.\nLanjutkan?")
+                btn_overwrite = msg_box.addButton("Lanjutkan (Overwrite)", QMessageBox.AcceptRole)
+                btn_cancel = msg_box.addButton("Batalkan", QMessageBox.RejectRole)
+                msg_box.exec()
+                if msg_box.clickedButton() == btn_cancel: return
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e)); return
+        
+        self.gen_worker = GeneratorWorker(self.data_cache, self.output_dir)
+        self.gen_worker.log_msg.connect(lambda s: self.progress.setFormat(s))
+        self.gen_worker.finished.connect(self.on_generation_finished)
+        self.progress.setValue(0); self.progress.setRange(0, 0)
+        self.btn_gen.setEnabled(False)
+        self.gen_worker.start()
+
+    def on_generation_finished(self, result_msg):
+        self.progress.setRange(0, 100); self.progress.setValue(100); self.progress.setFormat("Selesai")
+        self.btn_gen.setEnabled(True); self.btn_gen.setText("GENERATE SELESAI")
+        
+        # Cek apakah result_msg berisi path (sukses) atau error
+        if "ERROR:" in result_msg:
+            QMessageBox.critical(self, "Gagal", result_msg)
         else:
-            ts = datetime.now().strftime("%H:%M:%S")
-            self.lbl_status.setText(f"Scan selesai {ts}. Menunggu save manual.")
-
-    def get_hardcoded_mapping(self):
-        return {
-            "No": 2, "Project No": 3, "Proj Date": 5, "Cust Name": 6,
-            "Project Value": 8, "Kurs": 9, "Sub Total": 11, "Penalty": 12,
-            "Warranty": 13, "Total Cost": 15, "CM Booked": 16, "CR Booked": 17,
-            "CM %": 19
-        }
-
-    def save_to_legacy_xls(self, silent=False):
-        if not self.target_file:
-            if not silent: QMessageBox.warning(self, "Warning", "Pilih file target dulu!")
-            return
-
-        import xlwt
-        from xlutils.copy import copy
-        
-        try:
-            # --- 1. DETEKSI LOCKING SAAT MEMBUKA (READ) ---
-            rb = xlrd.open_workbook(self.target_file, formatting_info=True)
+            # Sukses
+            reply = QMessageBox.question(self, "Sukses", 
+                                         f"Generate selesai!\nFile Summary:\n{result_msg}\n\n"
+                                         "Buka folder output di Windows Explorer?",
+                                         QMessageBox.Yes | QMessageBox.No)
             
-        except PermissionError:
-            # HANDLER 1: File terkunci saat mau dibaca
-            msg = "❌ GAGAL BACA: File Excel sedang dibuka! Tutup file lalu coba lagi."
-            self.lbl_status.setText(msg)
-            self.lbl_status.setStyleSheet("color: red; font-weight: bold;")
-            if not silent: QMessageBox.critical(self, "File Terkunci", msg)
-            return
-        except Exception as e:
-            if not silent: QMessageBox.critical(self, "Error", str(e))
-            return
-        
-        target_sheet_name = "PCM"
-        sheet_idx = 0
-        for idx, name in enumerate(rb.sheet_names()):
-            if name.strip().upper() == target_sheet_name:
-                sheet_idx = idx
-                break
-        r_sheet = rb.sheet_by_index(sheet_idx)
-        wb = copy(rb)
-        w_sheet = wb.get_sheet(sheet_idx)
+            if reply == QMessageBox.Yes:
+                # Buka Folder Output
+                QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_dir))
 
-        # STYLES
-        borders = xlwt.Borders()
-        borders.left = xlwt.Borders.THIN
-        borders.right = xlwt.Borders.THIN
-        borders.top = xlwt.Borders.THIN
-        borders.bottom = xlwt.Borders.THIN
-        
-        style_center = xlwt.XFStyle(); style_center.borders = borders; style_center.alignment = xlwt.Alignment()
-        style_center.alignment.horz = xlwt.Alignment.HORZ_CENTER; style_center.alignment.vert = xlwt.Alignment.VERT_CENTER
-        
-        style_date = xlwt.XFStyle(); style_date.borders = borders; style_date.alignment = xlwt.Alignment()
-        style_date.alignment.horz = xlwt.Alignment.HORZ_CENTER; style_date.num_format_str = 'D-MMM-YY'
-        
-        style_text = xlwt.XFStyle(); style_text.borders = borders; style_text.alignment = xlwt.Alignment()
-        style_text.alignment.horz = xlwt.Alignment.HORZ_LEFT; style_text.alignment.vert = xlwt.Alignment.VERT_CENTER
-        
-        style_num = xlwt.XFStyle(); style_num.borders = borders; style_num.alignment = xlwt.Alignment()
-        style_num.alignment.horz = xlwt.Alignment.HORZ_RIGHT; style_num.num_format_str = '#,##0'
-        
-        style_pct = xlwt.XFStyle(); style_pct.borders = borders; style_pct.alignment = xlwt.Alignment()
-        style_pct.alignment.horz = xlwt.Alignment.HORZ_RIGHT; style_pct.num_format_str = '0.00%'
-
-        START_ROW_INDEX = 4 
-        col_indices = self.get_hardcoded_mapping()
-        proj_col_idx = col_indices["Project No"] 
-
-        existing_projects = set()
-        write_row = START_ROW_INDEX
-        while write_row < r_sheet.nrows:
-            try:
-                p_val = r_sheet.cell_value(write_row, proj_col_idx)
-                if not str(p_val).strip(): break
-                existing_projects.add(str(p_val).strip())
-                write_row += 1
-            except IndexError: break
-        
-        added_count = 0
-        for item in self.all_data:
-            p_no = str(item.get("Project No")).strip()
-            if p_no in existing_projects: continue
-
-            no_col = col_indices["No"]
-            existing_no = None
-            try: existing_no = r_sheet.cell_value(write_row, no_col)
-            except: pass
-            
-            if not (isinstance(existing_no, (int, float)) and existing_no > 0):
-                calc_no = (write_row - START_ROW_INDEX) + 1
-                w_sheet.write(write_row, no_col, calc_no, style_center)
-
-            excel_row = write_row + 1 
-            for key, col_idx in col_indices.items():
-                if key == "No": continue
-                val = item.get(key)
-                use_style = style_text
-
-                if key == "CM %":
-                    formula_str = f"IF(I{excel_row}=0,0, S{excel_row}/I{excel_row})"
-                    w_sheet.write(write_row, col_idx, xlwt.Formula(formula_str), style_pct)
-                    continue
-
-                if key in ["Project Value", "Kurs", "Sub Total", "Penalty", "Warranty", 
-                           "Total Cost", "CM Booked", "CR Booked"]:
-                    use_style = style_num
-                    try: val = float(val)
-                    except: val = 0
-                elif key == "Proj Date": use_style = style_date
-
-                if val is not None: w_sheet.write(write_row, col_idx, val, use_style)
-            
-            w_sheet.write(write_row, 18, xlwt.Formula(f"I{excel_row}-P{excel_row}"), style_num)
-            w_sheet.write(write_row, 7, "IDR", style_center)
-            write_row += 1
-            added_count += 1
-
-        try:
-            # --- 2. DETEKSI LOCKING SAAT MENYIMPAN (WRITE) ---
-            wb.save(self.target_file)
-            
-            ts = datetime.now().strftime("%H:%M:%S")
-            msg = f"✅ Auto-Saved to Excel at {ts} (+{added_count} Data)"
-            self.lbl_status.setText(msg)
-            self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
-            
-            if not silent: 
-                QMessageBox.information(self, "Update Sukses", f"Data Baru: {added_count}\nBerhasil update ke file .xls")
-                
-        except PermissionError:
-             # HANDLER 2: File terkunci saat mau disimpan
-            msg = "❌ GAGAL SAVE: File Excel sedang dibuka! Tutup file lalu coba lagi."
-            self.lbl_status.setText(msg)
-            self.lbl_status.setStyleSheet("color: red; font-weight: bold;")
-            if not silent: QMessageBox.critical(self, "Gagal", msg)
-        except Exception as e:
-            self.lbl_status.setText(f"Error Save: {e}")
-
-    def check_license_validity(self):
-        QMessageBox.warning(self, "DEMO WARNING", 
-                        "Masa uji coba hanya bisa memproses 5 file dalam satu direktori.\n"
-                        "Silakan hubungi developer untuk lisensi penuh.\n\n"
-                        "Whatsapp: 0853-1740-4760")
-        return
-            
-        # SETTING TANGGAL KADALUARSA (Tahun, Bulan, Tanggal)
-        # Misal: Trial hanya berlaku sampai 30 Juni 2025
-        expiry_date = datetime(2025, 12, 14) 
-        current_date = datetime.now()
-
-        if current_date > expiry_date:
-            QMessageBox.critical(self, "Trial Expired", 
-                                 "Masa uji coba (Trial) aplikasi ini telah berakhir.\n"
-                                 "Silakan hubungi developer untuk lisensi penuh.\n\n"
-                                 "Whatsapp: 0853-1740-4760")
-            sys.exit() # Matikan aplikasi seketika
+    def show_about_dialog(self):
+        info = (
+            "<h3>PCM Summary Generator</h3>"
+            "<p>Version: 1.0.0</p>"
+            "<p>Aplikasi untuk rekapitulasi otomatis Project Cost Management.</p>"
+            "<hr>"
+            "<p><b>Developer:</b> Fahmi Fauzi Rahman</p>"
+            "<p><b>Contact:</b> 0853-1740-4760</p>"
+            "<hr>"
+            "<p><b>Credits / Libraries Used:</b></p>"
+            "<ul>"
+            "<li>Python 3</li>"
+            "<li>PySide6 (Qt for Python)</li>"
+            "<li>openpyxl (Excel Modern Support)</li>"
+            "<li>xlrd (Excel Classic Support)</li>"
+            "</ul>"
+        )
+        QMessageBox.about(self, "About Application", info)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = MainWindow()
-    window.check_license_validity()
-    window.show()
-
+    w = MainWindow()
+    w.show()
     sys.exit(app.exec())
