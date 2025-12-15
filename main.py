@@ -85,16 +85,23 @@ def parse_xls_classic(filepath):
             
             if "SUB TOTAL" in txt and sub_total == 0: sub_total = sheet.cell_value(r, 4)
             elif "PENALTY" in txt and penalty == 0: penalty = sheet.cell_value(r, 4)
+            elif "WARRANTY" in txt and warranty == 0: warranty = sheet.cell_value(r, 4)
             elif "WARRANTTY" in txt and warranty == 0: warranty = sheet.cell_value(r, 4)
             elif "TOTAL COST" in txt and total_cost == 0: total_cost = sheet.cell_value(r, 4)
             elif "CM BOOKED" in txt and cm_booked == 0: cm_booked = sheet.cell_value(r, 4)
             elif "CR BOOKED" in txt and cr_booked == 0: cr_booked = sheet.cell_value(r, 4)
 
+            cust_name = get_xls_val("K3")
+            project_no = get_xls_val("K4")
+            if not project_no:
+                cust_name = get_xls_val("H3")
+                project_no = get_xls_val("H4")
+
         return {
             "status": "OK",
             "_sort_date": date_obj,
-            "Project No": get_xls_val("K4"),
-            "Cust Name": get_xls_val("K3"),
+            "Project No": project_no,
+            "Cust Name": cust_name,
             "Proj Date": date_str,
             "Kurs": clean_currency(get_xls_val("B4")),
             "Project Value": clean_currency(get_xls_val("B5")),
@@ -137,15 +144,23 @@ def parse_xlsx_modern(filepath):
             if "SUB TOTAL" in txt and sub_total == 0: sub_total = sheet.cell(row=r, column=val_col).value
             elif "PENALTY" in txt and penalty == 0: penalty = sheet.cell(row=r, column=val_col).value
             elif "WARRANTY" in txt and warranty == 0: warranty = sheet.cell(row=r, column=val_col).value
+            elif "WARRANTTY" in txt and warranty == 0: warranty = sheet.cell(row=r, column=val_col).value
             elif "TOTAL COST" in txt and total_cost == 0: total_cost = sheet.cell(row=r, column=val_col).value
             elif "CM BOOKED" in txt and cm_booked == 0: cm_booked = sheet.cell(row=r, column=val_col).value
             elif "CR BOOKED" in txt and cr_booked == 0: cr_booked = sheet.cell(row=r, column=val_col).value
 
+            cust_name = get_xlsx_val("K3")
+            project_no = get_xlsx_val("K4")
+
+            if not project_no:
+                cust_name = get_xlsx_val("H3")
+                project_no = get_xlsx_val("H4")
+
         return {
             "status": "OK",
             "_sort_date": date_obj,
-            "Project No": get_xlsx_val("K4"),
-            "Cust Name": get_xlsx_val("K3"),
+            "Project No": project_no,
+            "Cust Name": cust_name,
             "Proj Date": date_str,
             "Kurs": clean_currency(get_xlsx_val("B4")),
             "Project Value": clean_currency(get_xlsx_val("B5")),
@@ -283,7 +298,7 @@ class GeneratorWorker(QThread):
         copied_count = 0
         created_paths = set()
         
-        # 1. COPY & RENAME
+        # 1. COPY & RENAME (Tetap sama seperti kode asli)
         for item in valid_data:
             try:
                 old_path = item["path"]
@@ -297,8 +312,8 @@ class GeneratorWorker(QThread):
                 new_path = os.path.join(self.output_folder, new_name)
                 
                 counter = 1
-                while new_path in created_paths or os.path.exists(new_path) and new_path not in created_paths:
-                    if new_path not in created_paths: break # Overwrite existing file is OK
+                while new_path in created_paths or (os.path.exists(new_path) and new_path not in created_paths):
+                    if new_path not in created_paths: break 
                     new_name = f"{base_name} ({counter}){ext}"
                     new_path = os.path.join(self.output_folder, new_name)
                     counter += 1
@@ -312,57 +327,135 @@ class GeneratorWorker(QThread):
 
         self.log_msg.emit(f"✅ Berhasil menyalin {copied_count} file.")
 
-        # 2. GENERATE SUMMARY EXCEL
+        # 2. GENERATE SUMMARY EXCEL (DIMODIFIKASI SESUAI GAMBAR)
         try:
             self.log_msg.emit("📊 Membuat file summary...")
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "PCM SUMMARY"
             
-            headers = ["No", "Project No", "Proj Date", "Cust Name", "Project Value", 
-                       "Kurs", "BARANG&JASA", "Penalty", "Warranty", "Total Cost", 
-                       "CM Booked", "CR Booked", "CM IDR", "CM %", "Status File"]
+            # --- A. SETUP JUDUL (Row 1) ---
+            current_year = datetime.now().year
+            ws['A1'] = f"PCM {current_year} SUMMARY"
+            ws['A1'].font = openpyxl.styles.Font(size=14, bold=True, name='Calibri')
             
-            # Styles
-            header_font = openpyxl.styles.Font(bold=True, color="FFFFFF")
-            header_fill = openpyxl.styles.PatternFill("solid", fgColor="2196F3")
-            duplicate_fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00") # Kuning
-            border = openpyxl.styles.Border(left=openpyxl.styles.Side(style='thin'), 
-                                            right=openpyxl.styles.Side(style='thin'), 
-                                            top=openpyxl.styles.Side(style='thin'), 
-                                            bottom=openpyxl.styles.Side(style='thin'))
-
-            ws.append(headers)
-            for cell in ws[1]:
+            # --- B. SETUP HEADER (Row 3) ---
+            # Kolom sesuai gambar:
+            # 1.No, 2.Project no, 3.Busunit, 4.Proj date, 5.Cust name, 6.Ccy, 
+            # 7.Project value, 8.Kurs, 9.Proj IDR, 10.BARANG&JASA, 11.Penalty, 
+            # 12.Warranty, 13.Freight, 14.Cost (estd.), 15.CM booked, 16.CR booked, 
+            # 17.CM IDR, 18.CM %, 19.COST %, 20.Ket.
+            
+            headers = [
+                "No", "Project no.", "Busunit", "Proj date", "Cust name", "Ccy",
+                "Project value", "Kurs", "Proj IDR", "BARANG&JASA", "Penalty",
+                "Warranty", "Freight", "Cost (estd.)", "CM booked", "CR booked",
+                "CM IDR", "CM %", "COST %", "Ket."
+            ]
+            
+            # Styling Header sesuai Gambar (Background Cyan, Border Biru Tebal/Tipis)
+            header_font = openpyxl.styles.Font(bold=True, name='Calibri', size=11)
+            # Warna Cyan muda sesuai gambar
+            header_fill = openpyxl.styles.PatternFill("solid", fgColor="00FFFF") 
+            
+            # Border warna hitam
+            black_side = openpyxl.styles.Side(style='thin', color="000000")
+            border_black = openpyxl.styles.Border(left=black_side, right=black_side, top=black_side, bottom=black_side)
+            border_black_row = openpyxl.styles.Border(left=black_side, right=black_side)
+            
+            duplicate_fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00") # Kuning untuk duplikat
+            
+            # Tulis Header di Baris 3
+            header_row_idx = 3
+            ws.append([]) # Row 2 Kosong
+            ws.append(headers) # Row 3 Header
+            
+            for col_num, cell in enumerate(ws[header_row_idx], 1):
                 cell.font = header_font
                 cell.fill = header_fill
-                cell.alignment = openpyxl.styles.Alignment(horizontal='center')
-            
-            for idx, item in enumerate(valid_data, 1):
-                row = idx + 1
-                f_cm_idr = f"=E{row}-J{row}"
-                f_cm_pct = f"=IF(E{row}=0, 0, M{row}/E{row})"
-                
-                file_status = "COPIED"
-                if item["status"] == "DUPLIKAT":
-                    file_status = "DUPLICATE INPUT"
+                cell.border = border_black
+                cell.alignment = openpyxl.styles.Alignment(horizontal='center', vertical='center')
 
+            # --- C. ISI DATA (Mulai Row 4) ---
+            for idx, item in enumerate(valid_data, 1):
+                r = header_row_idx + idx # Row index di Excel
+                
+                # Ambil value dasar
+                val_project = item["Project Value"]
+                #val_kurs = item["Kurs"] if item["Kurs"] else 1.0
+                val_ccy = "IDR" # HARD CODED DULU
+                val_kurs = 1.0 # Paksa ke 1 karena currency selalu IDR
+                val_cost = f"=SUM(J{r}:M{r})"
+                val_cm = item["CM Booked"]
+                
+                # Rumus Excel
+                f_proj_idr = f"=G{r}*H{r}"                
+                f_cr_booked = item["CR Booked"]
+                f_cm_idr = f"=I{r}-N{r}"
+                f_cm_pct = f"=IF(N{r}=0, 0, Q{r}/I{r})"
+                f_cost_pct = f"=IF(Q{r}=0, 0, 1-R{r})"
+                
+                status_ket = ""
+                if item["status"] == "DUPLIKAT":
+                    status_ket = "Duplikat Input"
+
+                # Mapping Data ke Kolom
                 row_data = [
-                    idx, item["Project No"], item["Proj Date"], item["Cust Name"], item["Project Value"],
-                    "IDR", item["Sub Total"], item["Penalty"], item["Warranty"], item["Total Cost"],
-                    item["CM Booked"], item["CR Booked"], f_cm_idr, f_cm_pct, file_status
+                    idx,                        # 1. No
+                    item["Project No"],         # 2. Project no.
+                    "",                         # 3. Busunit (Kosong/Manual)
+                    item["Proj Date"],          # 4. Proj date
+                    item["Cust Name"],          # 5. Cust name
+                    val_ccy,                    # 6. Ccy
+                    val_project,                # 7. Project value
+                    val_kurs,                   # 8. Kurs
+                    f_proj_idr,                 # 9. Proj IDR (Rumus)
+                    item["Sub Total"],          # 10. BARANG&JASA
+                    item["Penalty"],            # 11. Penalty
+                    item["Warranty"],           # 12. Warranty
+                    0,                          # 13. Freight (Default 0/Manual)
+                    val_cost,                   # 14. Cost (estd.)
+                    val_cm,                     # 15. CM booked
+                    f_cr_booked,                # 16. CR booked (Rumus %)
+                    f_cm_idr,                   # 17. CM IDR (Rumus Link)
+                    f_cm_pct,                   # 18. CM % (Rumus %)
+                    f_cost_pct,                 # 19. COST % (Rumus %)
+                    status_ket                  # 20. Ket.
                 ]
+                
                 ws.append(row_data)
                 
+                # Styling Baris Data
                 for c, val in enumerate(row_data, 1):
-                    cell = ws.cell(row=row, column=c)
-                    cell.border = border
-                    if c in [5, 7, 8, 9, 10, 11, 12, 13]: cell.number_format = '#,##0'
-                    if c == 14: cell.number_format = '0.00%'
-                    if item["status"] == "DUPLIKAT": cell.fill = duplicate_fill
+                    cell = ws.cell(row=r, column=c)
+                    cell.border = border_black_row # Terapkan border ke row
+                    
+                    # Format Ribuan (Project Value, Proj IDR, B&J, Penalty, Warranty, Freight, Cost, CM, CM IDR)
+                    if c in [7, 9, 10, 11, 12, 13, 14, 15, 17]: 
+                        cell.number_format = '#,##0'
+                    
+                    # Format Kurs (2 desimal)
+                    if c == 8:
+                        cell.number_format = '#,##0.00'
 
-            current_year = datetime.now().year
-            summary_name = f"PCM SUMMARY {current_year}.xlsx"
+                    # Format Persentase (CR booked, CM %, COST %)
+                    if c in [16, 18, 19]:
+                        cell.number_format = '0.00%'
+                        
+                    # Highlight row duplikat
+                    if item["status"] == "DUPLIKAT":
+                        cell.fill = duplicate_fill
+
+            # Auto-adjust column width (sedikit styling agar rapi)
+            dims = {}
+            for row in ws.rows:
+                for cell in row:
+                    if cell.value:
+                        dims[cell.column_letter] = max((dims.get(cell.column_letter, 0), len(str(cell.value))))    
+            for col, value in dims.items():
+                ws.column_dimensions[col].width = value + 2
+
+            summary_name = f"PCM {current_year} SUMMARY.xlsx"
             summary_path = os.path.join(self.output_folder, summary_name)
             
             wb.save(summary_path)
@@ -604,7 +697,7 @@ class MainWindow(QMainWindow):
 
     def on_generation_finished(self, result_msg):
         self.progress.setRange(0, 100); self.progress.setValue(100); self.progress.setFormat("Selesai")
-        self.btn_gen.setEnabled(True); self.btn_gen.setText("GENERATE SELESAI")
+        self.btn_gen.setEnabled(True); self.btn_gen.setText("GENERATE ULANG")
         
         if "ERROR:" in result_msg:
             QMessageBox.critical(self, "Gagal", result_msg)
