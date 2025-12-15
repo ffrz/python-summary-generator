@@ -110,8 +110,7 @@ class GeneratorWorker(QThread):
         
     def run(self):
         self.log_msg.emit("🚀 Memulai proses generate...")
-        raw_valid_data = [d for d in self.data_list if d["status"] in ["OK", "DUPLIKAT"]]
-        valid_data = raw_valid_data[:10]
+        valid_data = [d for d in self.data_list if d["status"] in ["OK", "DUPLIKAT"]]
 
         copied_count = 0
         created_paths = set()

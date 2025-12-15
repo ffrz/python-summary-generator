@@ -248,9 +248,21 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, 1, make_item(item.get("Project No", "-")))
             self.table.setItem(r, 2, make_item(item.get("Cust Name", "-")))
             self.table.setItem(r, 3, make_item(item.get("Proj Date", "-")))
+
             val = item.get("Project Value", 0)
-            fmt_val = f"{val:,.0f}" if isinstance(val, (int, float)) else str(val)
-            self.table.setItem(r, 4, make_item(fmt_val))
+            if isinstance(val, (int, float)):
+                # Langkah 1: Format standar (1,250,000)
+                # Langkah 2: Replace koma menjadi titik (1.250.000)
+                fmt_val = f"{val:,.0f}".replace(",", ".")
+                
+                # OPSI: Jika ingin tambah 'Rp', uncomment baris bawah ini:
+                # fmt_val = f"Rp {fmt_val}" 
+            else:
+                fmt_val = str(val)
+            project_val_item = make_item(fmt_val)
+            project_val_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.table.setItem(r, 4, project_val_item)
+
             self.table.setItem(r, 5, make_item(status))
         
         self.table.setSortingEnabled(True)
