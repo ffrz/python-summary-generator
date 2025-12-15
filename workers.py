@@ -5,6 +5,7 @@ from datetime import datetime
 from PySide6.QtCore import QThread, Signal
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from PySide6.QtGui import QColor # Tidak dipakai di worker tapi sisa import aman
 
 from helpers import sanitize_filename, extract_year_from_date
 from parsers import extract_dispatcher
@@ -110,18 +111,25 @@ class GeneratorWorker(QThread):
         
     def run(self):
         self.log_msg.emit("🚀 Memulai proses generate...")
-        valid_data = [d for d in self.data_list if d["status"] in ["OK", "DUPLIKAT"]]
-
+        
+        # --- PERUBAHAN: Memproses SEMUA data, tidak hanya yang OK ---
+        # Kita gunakan list penuh, tanpa filter status
+        processing_data = self.data_list 
+        
         copied_count = 0
         created_paths = set()
         
         # 1. COPY & RENAME
-        for item in valid_data:
+        for item in processing_data:
+            # Skip copy jika status ERROR parah (tidak ada Project No), tapi tetap catat di Excel
+            if item.get("status") == "ERROR" or not item.get("Project No"):
+                continue
+
             try:
                 old_path = item["path"]
                 ext = os.path.splitext(old_path)[1]
-                p_id = sanitize_filename(item['Project No'])
-                cust = sanitize_filename(item['Cust Name'])
+                p_id = sanitize_filename(item.get('Project No', 'Unknown'))
+                cust = sanitize_filename(item.get('Cust Name', 'Unknown'))
                 year = extract_year_from_date(item.get('Proj Date'))
                 
                 base_name = f"PCM {p_id} {year} {cust}"
@@ -142,7 +150,7 @@ class GeneratorWorker(QThread):
             except Exception as e:
                 self.log_msg.emit(f"❌ Gagal copy {item['filename']}: {e}")
 
-        self.log_msg.emit(f"✅ Berhasil menyalin {copied_count} file.")
+        self.log_msg.emit(f"✅ Berhasil menyalin {copied_count} file valid.")
 
         # 2. GENERATE SUMMARY EXCEL
         try:
@@ -154,12 +162,10 @@ class GeneratorWorker(QThread):
             ws.title = f"PCM {current_year} SUMMARY"
             
             # --- A. SETUP JUDUL (Row 1) ---
-            # Judul digeser sedikit agar rapi (misal di kolom C)
             ws['B1'] = f"PCM {current_year} SUMMARY" 
             ws['B1'].font = openpyxl.styles.Font(size=14, bold=True, name='Calibri')
             
             # --- B. SETUP HEADER (Row 3) ---
-            # Total 21 Kolom (1 Kolom Baru + 20 Kolom Lama)
             headers = [
                 "File name",      # Col 1 (A)
                 "No",             # Col 2 (B)
@@ -191,7 +197,8 @@ class GeneratorWorker(QThread):
             border_black = openpyxl.styles.Border(left=black_side, right=black_side, top=black_side, bottom=black_side)
             border_black_row = openpyxl.styles.Border(left=black_side, right=black_side)
             
-            duplicate_fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00") 
+            duplicate_fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00") # Kuning
+            error_fill = openpyxl.styles.PatternFill("solid", fgColor="FFCCCC") # Merah Muda (Untuk Error)
             
             header_row_idx = 3
             ws.append([]) # Row 2 Kosong
@@ -205,73 +212,73 @@ class GeneratorWorker(QThread):
 
             # --- C. ISI DATA (Mulai Row 4) ---
             start_data_row = header_row_idx + 1 
-            end_data_row = start_data_row + len(valid_data) - 1
+            end_data_row = start_data_row + len(processing_data) - 1
 
-            for idx, item in enumerate(valid_data, 1):
+            for idx, item in enumerate(processing_data, 1):
                 r = header_row_idx + idx # Row index di Excel
                 
-                # --- LOGIKA DATA ---
-                val_project = item["Project Value"]
+                # --- PENGAMBILAN DATA (SAFE ACCESS) ---
+                # Menggunakan .get() karena file ERROR tidak punya key lengkap
+                val_project = item.get("Project Value", 0)
                 val_ccy = item.get("Currency", "IDR")
                 
                 raw_kurs = item.get("Kurs", 1.0)
                 val_kurs = 1.0 if val_ccy == "IDR" else (raw_kurs if raw_kurs else 1.0)
                 
-                val_cm = item["CM Booked"]
+                val_cm = item.get("CM Booked", 0)
                 
                 # --- FIX DATE ---
                 val_date = item.get("_sort_date", datetime.min)
                 if val_date == datetime.min:
                     val_date = item.get("Proj Date", "")
 
-                # --- RUMUS EXCEL (GESER KOLOM +1 dari sebelumnya) ---
-                # H = Col 8 (Project Value), I = Col 9 (Kurs)
+                # --- RUMUS EXCEL ---
                 f_proj_idr = f"=H{r}*I{r}" 
-                
-                # K=11, L=12, M=13, N=14 -> Cost Estd = SUM(K:N)
                 val_cost = f"=SUM(K{r}:N{r})" 
                 
-                f_cr_booked = item["CR Booked"]
+                f_cr_booked = item.get("CR Booked", 0)
                 
-                # J = 10 (Proj IDR), O = 15 (Cost), R = 18 (CM IDR)
-                # CM IDR = Proj IDR - Cost ?? atau CM Booked? -> Sesuai kode lama: CM IDR = J - O
-                # TAPI di kode lama f_cm_idr = I - N (Proj IDR - Cost).
-                # Sekarang Proj IDR = J, Cost = O. Jadi:
                 f_cm_idr = f"=J{r}-O{r}" 
-                
-                # CM % = CM IDR / Proj IDR -> R / J
                 f_cm_pct = f"=IF(J{r}=0, 0, R{r}/J{r})"
+                f_cost_pct = f"=IF(J{r}=0, 0, O{r}/J{r})"
                 
-                # COST % = Cost / Proj IDR -> O / J
-                f_cost_pct = f"=IF(S{r}=0, 0, 1-S{r})"
-                
+                # --- STATUS & KETERANGAN ---
+                status = item.get("status", "UNKNOWN")
                 status_ket = ""
-                if item["status"] == "DUPLIKAT":
+                
+                fill_color = None
+                
+                if status == "DUPLIKAT":
                     status_ket = "Duplikat Input"
+                    fill_color = duplicate_fill
+                elif status != "OK":
+                    # Tampilkan pesan error di kolom Ket
+                    status_ket = item.get("msg", status)
+                    fill_color = error_fill
 
-                # Mapping Data (Perhatikan urutan)
+                # Mapping Data
                 row_data = [
-                    item["filename"],   # 1. Nama File Asli
-                    idx,                # 2. No
-                    item["Project No"], # 3. Project No
-                    "",                 # 4. Busunit
-                    val_date,           # 5. Proj Date
-                    item["Cust Name"],  # 6. Cust Name
-                    val_ccy,            # 7. Ccy
-                    val_project,        # 8. Project Value
-                    val_kurs,           # 9. Kurs
-                    f_proj_idr,         # 10. Proj IDR
-                    item["Sub Total"],  # 11. B&J
-                    item["Penalty"],    # 12. Penalty
-                    item["Warranty"],   # 13. Warranty
-                    0,                  # 14. Freight
-                    val_cost,           # 15. Cost Estd
-                    val_cm,             # 16. CM Booked
-                    f_cr_booked,        # 17. CR Booked
-                    f_cm_idr,           # 18. CM IDR
-                    f_cm_pct,           # 19. CM %
-                    f_cost_pct,         # 20. Cost %
-                    status_ket          # 21. Ket
+                    item.get("filename", "Unknown"), # 1. Nama File
+                    idx,                             # 2. No
+                    item.get("Project No", "-"),     # 3. Project No
+                    "",                              # 4. Busunit
+                    val_date,                        # 5. Proj Date
+                    item.get("Cust Name", "-"),      # 6. Cust Name
+                    val_ccy,                         # 7. Ccy
+                    val_project,                     # 8. Project Value
+                    val_kurs,                        # 9. Kurs
+                    f_proj_idr,                      # 10. Proj IDR
+                    item.get("Sub Total", 0),        # 11. B&J
+                    item.get("Penalty", 0),          # 12. Penalty
+                    item.get("Warranty", 0),         # 13. Warranty
+                    0,                               # 14. Freight
+                    val_cost,                        # 15. Cost Estd
+                    val_cm,                          # 16. CM Booked
+                    f_cr_booked,                     # 17. CR Booked
+                    f_cm_idr,                        # 18. CM IDR
+                    f_cm_pct,                        # 19. CM %
+                    f_cost_pct,                      # 20. Cost %
+                    status_ket                       # 21. Ket (Isi Pesan Error)
                 ]
                 
                 ws.append(row_data)
@@ -281,38 +288,24 @@ class GeneratorWorker(QThread):
                     cell = ws.cell(row=r, column=c)
                     cell.border = border_black_row 
                     
-                    # Format Tanggal (Kolom 5)
-                    if c == 5:
-                        cell.number_format = 'd-mmm-yy'
-
-                    # Format Ribuan (Kolom 8, 10-16, 18)
-                    if c in [8, 10, 11, 12, 13, 14, 15, 16, 18]: 
-                        cell.number_format = '#,##0'
+                    if c == 5: cell.number_format = 'd-mmm-yy'
+                    if c in [8, 10, 11, 12, 13, 14, 15, 16, 18]: cell.number_format = '#,##0'
+                    if c == 9: cell.number_format = '#,##0.00'
+                    if c in [17, 19, 20]: cell.number_format = '0.00%'
                     
-                    # Format Kurs (Kolom 9)
-                    if c == 9:
-                        cell.number_format = '#,##0.00'
-                    
-                    # Format Persen (Kolom 17, 19, 20)
-                    if c in [17, 19, 20]:
-                        cell.number_format = '0.00%'
-                        
-                    if item["status"] == "DUPLIKAT":
-                        cell.fill = duplicate_fill
+                    # Terapkan Warna (Kuning utk Duplikat, Merah utk Error)
+                    if fill_color:
+                        cell.fill = fill_color
 
             # --- D. TAMBAHKAN BARIS TOTAL (SUMMARY) ---
-            if valid_data:
+            if processing_data:
                 r_total = end_data_row + 1
                 
                 total_font = openpyxl.styles.Font(bold=True, name='Calibri', size=11)
                 total_border = openpyxl.styles.Border(top=black_side, bottom=openpyxl.styles.Side(style='medium', color="000000"))
                 
-                # Label GRAND TOTAL di kolom Ccy (Kolom 7)
                 ws.cell(row=r_total, column=7, value="GRAND TOTAL").font = total_font
                 
-                # Kolom yang akan di-SUM (Indeks Bergeser +1 dari kode lama)
-                # Lama: [7, 9, 10, 11, 12, 13, 14, 15, 17]
-                # Baru: [8, 10, 11, 12, 13, 14, 15, 16, 18]
                 sum_cols = [8, 10, 11, 12, 13, 14, 15, 16, 18]
                 
                 for c in range(1, len(headers) + 1):
@@ -324,7 +317,6 @@ class GeneratorWorker(QThread):
                         cell.value = sum_formula
                         cell.number_format = '#,##0'
                     
-                    # Styling Border (Kecuali kolom label Ccy = 7)
                     if c != 7 and c not in sum_cols:
                          cell.border = openpyxl.styles.Border(top=black_side, bottom=openpyxl.styles.Side(style='medium', color="000000"))
                     else:

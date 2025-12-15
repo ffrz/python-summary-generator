@@ -86,24 +86,22 @@ class OpenpyxlAdapter(ExcelAdapter):
 
 def extract_common_logic(adapter: ExcelAdapter):
     try:
-        # 1. Ambil Tanggal (Pakai Alamat 'B3')
+        # 1. Ambil Tanggal
         date_str, date_obj = adapter.get_date_by_addr("B3")
 
-        # 2. Deteksi Currency (Pakai Alamat 'A5')
+        # 2. Deteksi Currency
         raw_a5 = adapter.get_by_addr("A5")
         detected_ccy = detect_currency_from_text(raw_a5)
 
-        # 3. Scanning Baris (Looping tetap pakai index biar cepat)
+        # 3. Scanning Baris
         sub_total = 0; penalty = 0; warranty = 0; total_cost = 0; cm_booked = 0; cr_booked = 0
         limit = min(adapter.max_rows, 150)
 
         for r in range(9, limit):
-            raw = adapter.get_val(r, 0) # Kolom A (Index 0)
+            raw = adapter.get_val(r, 0)
             txt = str(raw).upper() if raw else ""
-            
             if not txt: continue
-
-            val_col = 4 # Kolom E (Index 4) - Tempat nilai berada
+            val_col = 4 
             
             if "SUB TOTAL" in txt and sub_total == 0: 
                 sub_total = adapter.get_val(r, val_col)
@@ -120,49 +118,62 @@ def extract_common_logic(adapter: ExcelAdapter):
             elif "CR BOOKED" in txt and cr_booked == 0: 
                 cr_booked = adapter.get_val(r, val_col)
 
-        # 4. Header Info (Pencarian Dinamis untuk Project No & Customer)
+        # 4. Header Info (Pencarian Dinamis)
         project_no = None
         cust_name = None
         
-        # [Logika Baru] Scan area header (Rows 0-10, Cols 0-20)
-        # Cari cell yang teks-nya diawali "Project No"
         found = False
         for r in range(11): 
             if found: break
             for c in range(21):
                 val = adapter.get_val(r, c)
                 if val and str(val).strip().upper().startswith("PROJECT NO"):
-                    # 1. Ambil nilai di sebelah kanannya (col + 1)
                     project_no = adapter.get_val(r, c + 1)
-                    
-                    # 2. Ambil nilai customer di atas cell nilai project (row - 1, col + 1)
-                    # Pastikan row > 0 agar tidak error index -1
-                    if r > 0:
-                        cust_name = adapter.get_val(r - 1, c + 1)
-                    
+                    if r > 0: cust_name = adapter.get_val(r - 1, c + 1)
                     found = True
                     break
         
-        # Fallback 1: Coba lokasi standar K4
         if not project_no:
             project_no = adapter.get_by_addr("K4")
             cust_name = adapter.get_by_addr("K3")
-
-        # Fallback 2: Coba lokasi alternatif H4
         if not project_no:
             project_no = adapter.get_by_addr("H4")
             cust_name = adapter.get_by_addr("H3")
 
-        # 5. Return Data
+        # 5. Ambil Nilai Lainnya
+        kurs = clean_currency(adapter.get_by_addr("B4"))
+        project_val = clean_currency(adapter.get_by_addr("B5"))
+        
+        # --- VALIDASI KELENGKAPAN DATA ---
+        status = "OK"
+        msg = ""
+
+        # Cek Project Value
+        if not project_val or project_val == 0:
+            status = "DATA INCOMPLETE"
+            msg = "Project Value 0/Kosong"
+        
+        # Cek Sub Total (Indikator parsing baris gagal/data kosong)
+        elif not sub_total or sub_total == 0:
+            status = "DATA INCOMPLETE"
+            msg = "Sub Total Kosong/Gagal Parse"
+            
+        # Cek Tanggal
+        elif not date_str:
+            status = "DATA INCOMPLETE"
+            msg = "Tanggal Proyek Kosong"
+
+        # 6. Return Data
         return {
-            "status": "OK",
+            "status": status,
+            "msg": msg, # Pesan error jika ada
             "_sort_date": date_obj,
             "Project No": project_no,
             "Cust Name": cust_name,
             "Proj Date": date_str,
             "Currency": detected_ccy,
-            "Kurs": clean_currency(adapter.get_by_addr("B4")),          # Kurs
-            "Project Value": clean_currency(adapter.get_by_addr("B5")), # Project Value
+            "Kurs": kurs,
+            "Project Value": project_val,
             "Sub Total": clean_currency(sub_total),
             "Penalty": clean_currency(penalty),
             "Warranty": clean_currency(warranty),

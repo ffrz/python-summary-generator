@@ -15,19 +15,17 @@ class HelpDialog(QDialog):
     def __init__(self, content, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Panduan Pengguna - PCM Summary Generator")
-        self.resize(700, 600) # Ukuran sedikit diperbesar agar lega
+        self.resize(700, 600) 
         
         layout = QVBoxLayout(self)
         
-        # Area Teks Read-Only
         self.text_area = QTextEdit()
         self.text_area.setPlainText(content)
         self.text_area.setReadOnly(True)
-        self.text_area.setFont(QFont("Consolas", 10)) # Font Monospace
+        self.text_area.setFont(QFont("Consolas", 10)) 
         
         layout.addWidget(self.text_area)
         
-        # Tombol Tutup
         btn_close = QPushButton("Tutup")
         btn_close.clicked.connect(self.close)
         layout.addWidget(btn_close)
@@ -36,10 +34,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(" PCM Summary Generator v1.0.0")
-        self.resize(1000, 650)
+        self.resize(1200, 650) # Lebarkan sedikit default window karena kolom bertambah
         self.settings = QSettings("FahmiSoft", "PCMGenerator")
         
-        # --- VARIABEL UNTUK JENDELA HELP (Agar tidak blocking) ---
         self.help_window = None 
 
         central = QWidget()
@@ -69,7 +66,14 @@ class MainWindow(QMainWindow):
         
         # --- TABLE ---
         self.table = QTableWidget()
-        cols = ["Nama File Asli", "Project ID", "Customer", "Date", "Nilai Project", "Status"]
+        
+        # UPDATE KOLOM: Status dipindah ke index 1, dan semua data ditampilkan
+        cols = [
+            "Nama File Asli", "Status", "Project No", "Customer", "Proj Date", 
+            "Ccy", "Kurs", "Project Value", "Sub Total", "Penalty", 
+            "Warranty", "Total Cost", "CM Booked", "CR Booked"
+        ]
+        
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -81,9 +85,12 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
 
-        self.table.setColumnWidth(0, 300) 
-        self.table.setColumnWidth(1, 100) # Project ID
-        self.table.setColumnWidth(4, 150) # Nilai Project
+        # Atur lebar kolom agar rapi
+        self.table.setColumnWidth(0, 250) # File Name
+        self.table.setColumnWidth(1, 120) # Status (Penting)
+        self.table.setColumnWidth(2, 100) # Project No
+        self.table.setColumnWidth(3, 150) # Customer
+        self.table.setColumnWidth(7, 120) # Project Value
         
         # --- FITUR SORTING ---
         self.table.setSortingEnabled(True)
@@ -120,14 +127,12 @@ class MainWindow(QMainWindow):
         lbl_version = QLabel("PCM Summary Generator v 1.0.0")
         status_bar.addWidget(lbl_version)
         
-        # --- TOMBOL BANTUAN ---
         btn_help = QPushButton("Bantuan / Help")
         btn_help.setFlat(True)
         btn_help.setStyleSheet("font-weight: bold; color: #2196F3;") 
         btn_help.clicked.connect(self.open_help_dialog) 
         status_bar.addPermanentWidget(btn_help)
 
-        # --- TOMBOL ABOUT ---
         btn_about = QPushButton("About")
         btn_about.setFlat(True)
         btn_about.setStyleSheet("font-weight: bold; color: #555;")
@@ -135,13 +140,7 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(btn_about)
 
     def open_help_dialog(self):
-        """
-        Membuka jendela bantuan secara Non-Blocking (Modeless).
-        User tetap bisa klik Main Window saat jendela ini terbuka.
-        """
         filename = "USER_MANUAL.txt"
-        
-        # Logika mencari path file text
         if getattr(sys, 'frozen', False):
             base_path = os.path.dirname(sys.executable)
         else:
@@ -161,17 +160,10 @@ class MainWindow(QMainWindow):
                        f"Lokasi pencarian: {help_path}\n\n"
                        "Pastikan file manual ada di folder aplikasi.")
 
-        # --- LOGIKA JENDELA NON-BLOCKING ---
-        # 1. Jika jendela belum pernah dibuat, atau sudah dihancurkan -> Buat baru
         if self.help_window is None:
             self.help_window = HelpDialog(content, self)
-            # Opsional: Jika user menutup jendela, kita set variable ke None lagi (opsional)
-            # Tapi di sini kita biarkan objectnya hidup agar posisi/ukuran tersimpan selama aplikasi jalan
         
-        # 2. Tampilkan Jendela (Non-Blocking)
         self.help_window.show()
-        
-        # 3. Bawa ke depan (agar tidak tertutup main window jika sudah terbuka sebelumnya)
         self.help_window.raise_()
         self.help_window.activateWindow()
 
@@ -229,6 +221,7 @@ class MainWindow(QMainWindow):
     def on_preview_done(self, results):
         self.data_cache = results
         self.table.setRowCount(len(results))
+        
         for r, item in enumerate(results):
             status = item["status"]
             color = QColor(Qt.black)
@@ -239,37 +232,66 @@ class MainWindow(QMainWindow):
             elif status != "OK":
                 bg_color = QColor("#FFCDD2"); color = QColor(Qt.red)
             
-            def make_item(text):
+            def make_item(text, align_right=False):
                 it = QTableWidgetItem(str(text))
                 it.setForeground(color); it.setBackground(bg_color)
+                if align_right:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 return it
 
+            def format_num(val):
+                if isinstance(val, (int, float)):
+                    return f"{val:,.0f}".replace(",", ".")
+                return str(val)
+
+            # MAPPING DATA KE KOLOM TABEL
+            # 0. File Name
             self.table.setItem(r, 0, make_item(item["filename"]))
-            self.table.setItem(r, 1, make_item(item.get("Project No", "-")))
-            self.table.setItem(r, 2, make_item(item.get("Cust Name", "-")))
-            self.table.setItem(r, 3, make_item(item.get("Proj Date", "-")))
-
-            val = item.get("Project Value", 0)
-            if isinstance(val, (int, float)):
-                # Langkah 1: Format standar (1,250,000)
-                # Langkah 2: Replace koma menjadi titik (1.250.000)
-                fmt_val = f"{val:,.0f}".replace(",", ".")
-                
-                # OPSI: Jika ingin tambah 'Rp', uncomment baris bawah ini:
-                # fmt_val = f"Rp {fmt_val}" 
-            else:
-                fmt_val = str(val)
-            project_val_item = make_item(fmt_val)
-            project_val_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.table.setItem(r, 4, project_val_item)
-
-            self.table.setItem(r, 5, make_item(status))
+            
+            # 1. Status (DIPINDAHKAN KE SINI)
+            self.table.setItem(r, 1, make_item(status))
+            
+            # 2. Project No
+            self.table.setItem(r, 2, make_item(item.get("Project No", "-")))
+            
+            # 3. Customer
+            self.table.setItem(r, 3, make_item(item.get("Cust Name", "-")))
+            
+            # 4. Proj Date
+            self.table.setItem(r, 4, make_item(item.get("Proj Date", "-")))
+            
+            # 5. Currency
+            self.table.setItem(r, 5, make_item(item.get("Currency", "-")))
+            
+            # 6. Kurs (Number)
+            self.table.setItem(r, 6, make_item(format_num(item.get("Kurs", 0)), True))
+            
+            # 7. Project Value (Number)
+            self.table.setItem(r, 7, make_item(format_num(item.get("Project Value", 0)), True))
+            
+            # 8. Sub Total (Number)
+            self.table.setItem(r, 8, make_item(format_num(item.get("Sub Total", 0)), True))
+            
+            # 9. Penalty (Number)
+            self.table.setItem(r, 9, make_item(format_num(item.get("Penalty", 0)), True))
+            
+            # 10. Warranty (Number)
+            self.table.setItem(r, 10, make_item(format_num(item.get("Warranty", 0)), True))
+            
+            # 11. Total Cost (Number)
+            self.table.setItem(r, 11, make_item(format_num(item.get("Total Cost", 0)), True))
+            
+            # 12. CM Booked (Number)
+            self.table.setItem(r, 12, make_item(format_num(item.get("CM Booked", 0)), True))
+            
+            # 13. CR Booked (Persentase - Opsional, disini saya tampilkan raw atau format number)
+            # Karena di JSON nilainya angka, kita format angka saja
+            self.table.setItem(r, 13, make_item(format_num(item.get("CR Booked", 0)), True))
         
         self.table.setSortingEnabled(True)
         self.check_ready()
         self.statusBar().showMessage(f"Scan selesai. Total {len(results)} file.", 3000)
 
-    # --- FITUR DOUBLE CLICK OPEN EXCEL ---
     def on_table_double_click(self, row, col):
         if row < 0 or row >= len(self.data_cache): return
         
@@ -297,11 +319,22 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", "File tidak ditemukan!")
 
     def check_ready(self):
-        valid_count = sum(1 for d in self.data_cache if d["status"] in ["OK", "DUPLIKAT"])
-        is_ready = bool(self.input_dir and self.output_dir and valid_count > 0)
+        # Kita hitung semua file karena worker sekarang memproses semuanya (termasuk Error)
+        total_count = len(self.data_cache)
+        
+        # Tombol aktif jika Input Folder Ada + Output Folder Ada + Ada File (minimal 1)
+        is_ready = bool(self.input_dir and self.output_dir and total_count > 0)
+        
         self.btn_gen.setEnabled(is_ready)
-        if is_ready: self.btn_gen.setText(f"3. GENERATE ({valid_count} File Valid)")
-        else: self.btn_gen.setText("3. GENERATE (Menunggu Input/Output)")
+        
+        if is_ready:
+            # Teks diubah jadi "File" saja karena mencakup OK, Duplikat, dan Error
+            self.btn_gen.setText(f"3. GENERATE ({total_count} File)")
+        else:
+            if total_count == 0 and self.input_dir:
+                self.btn_gen.setText("3. GENERATE (Folder Kosong)")
+            else:
+                self.btn_gen.setText("3. GENERATE (Menunggu Input/Output)")
 
     def start_generation(self):
         if not self.output_dir: return
