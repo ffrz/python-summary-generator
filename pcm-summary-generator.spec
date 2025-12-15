@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='PCM_Auto_Sync_Demo',
+    name='PCM Summary Generator',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
