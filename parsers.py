@@ -120,13 +120,38 @@ def extract_common_logic(adapter: ExcelAdapter):
             elif "CR BOOKED" in txt and cr_booked == 0: 
                 cr_booked = adapter.get_val(r, val_col)
 
-        # 4. Header Info (Pakai Alamat String - Jauh lebih mudah dibaca)
-        cust_name = adapter.get_by_addr("K3")
-        project_no = adapter.get_by_addr("K4")
-
+        # 4. Header Info (Pencarian Dinamis untuk Project No & Customer)
+        project_no = None
+        cust_name = None
+        
+        # [Logika Baru] Scan area header (Rows 0-10, Cols 0-20)
+        # Cari cell yang teks-nya diawali "Project No"
+        found = False
+        for r in range(11): 
+            if found: break
+            for c in range(21):
+                val = adapter.get_val(r, c)
+                if val and str(val).strip().upper().startswith("PROJECT NO"):
+                    # 1. Ambil nilai di sebelah kanannya (col + 1)
+                    project_no = adapter.get_val(r, c + 1)
+                    
+                    # 2. Ambil nilai customer di atas cell nilai project (row - 1, col + 1)
+                    # Pastikan row > 0 agar tidak error index -1
+                    if r > 0:
+                        cust_name = adapter.get_val(r - 1, c + 1)
+                    
+                    found = True
+                    break
+        
+        # Fallback 1: Coba lokasi standar K4
         if not project_no:
-            cust_name = adapter.get_by_addr("H3")
+            project_no = adapter.get_by_addr("K4")
+            cust_name = adapter.get_by_addr("K3")
+
+        # Fallback 2: Coba lokasi alternatif H4
+        if not project_no:
             project_no = adapter.get_by_addr("H4")
+            cust_name = adapter.get_by_addr("H3")
 
         # 5. Return Data
         return {

@@ -1,20 +1,47 @@
 import os
+import sys 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QLabel, QProgressBar, 
                                QTableWidget, QTableWidgetItem, QFileDialog, 
-                               QMessageBox, QHeaderView, QAbstractItemView)
+                               QMessageBox, QHeaderView, QAbstractItemView,
+                               QDialog, QTextEdit)
 from PySide6.QtCore import Qt, QSettings, QUrl, QTimer
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QFont
 
 from workers import WatcherThread, PreviewWorker, GeneratorWorker
+
+# --- KELAS DIALOG BANTUAN ---
+class HelpDialog(QDialog):
+    def __init__(self, content, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Panduan Pengguna - PCM Summary Generator")
+        self.resize(700, 600) # Ukuran sedikit diperbesar agar lega
+        
+        layout = QVBoxLayout(self)
+        
+        # Area Teks Read-Only
+        self.text_area = QTextEdit()
+        self.text_area.setPlainText(content)
+        self.text_area.setReadOnly(True)
+        self.text_area.setFont(QFont("Consolas", 10)) # Font Monospace
+        
+        layout.addWidget(self.text_area)
+        
+        # Tombol Tutup
+        btn_close = QPushButton("Tutup")
+        btn_close.clicked.connect(self.close)
+        layout.addWidget(btn_close)
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PCM Summary Generator v1.0.0")
+        self.setWindowTitle(" PCM Summary Generator v1.0.0")
         self.resize(1000, 650)
         self.settings = QSettings("FahmiSoft", "PCMGenerator")
         
+        # --- VARIABEL UNTUK JENDELA HELP (Agar tidak blocking) ---
+        self.help_window = None 
+
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -49,7 +76,7 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
 
-        # --- PENGGANTI ---
+        # --- HEADER SETUP ---
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
@@ -90,13 +117,63 @@ class MainWindow(QMainWindow):
 
     def setup_statusbar(self):
         status_bar = self.statusBar()
-        lbl_version = QLabel("   PCM Summary Generator v 1.0.0")
+        lbl_version = QLabel("PCM Summary Generator v 1.0.0")
         status_bar.addWidget(lbl_version)
+        
+        # --- TOMBOL BANTUAN ---
+        btn_help = QPushButton("Bantuan / Help")
+        btn_help.setFlat(True)
+        btn_help.setStyleSheet("font-weight: bold; color: #2196F3;") 
+        btn_help.clicked.connect(self.open_help_dialog) 
+        status_bar.addPermanentWidget(btn_help)
+
+        # --- TOMBOL ABOUT ---
         btn_about = QPushButton("About")
         btn_about.setFlat(True)
         btn_about.setStyleSheet("font-weight: bold; color: #555;")
         btn_about.clicked.connect(self.show_about_dialog)
         status_bar.addPermanentWidget(btn_about)
+
+    def open_help_dialog(self):
+        """
+        Membuka jendela bantuan secara Non-Blocking (Modeless).
+        User tetap bisa klik Main Window saat jendela ini terbuka.
+        """
+        filename = "USER_MANUAL.txt"
+        
+        # Logika mencari path file text
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            
+        help_path = os.path.join(base_path, filename)
+        
+        content = ""
+        if os.path.exists(help_path):
+            try:
+                with open(help_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception as e:
+                content = f"Error membaca file:\n{e}"
+        else:
+            content = (f"File '{filename}' tidak ditemukan.\n\n"
+                       f"Lokasi pencarian: {help_path}\n\n"
+                       "Pastikan file manual ada di folder aplikasi.")
+
+        # --- LOGIKA JENDELA NON-BLOCKING ---
+        # 1. Jika jendela belum pernah dibuat, atau sudah dihancurkan -> Buat baru
+        if self.help_window is None:
+            self.help_window = HelpDialog(content, self)
+            # Opsional: Jika user menutup jendela, kita set variable ke None lagi (opsional)
+            # Tapi di sini kita biarkan objectnya hidup agar posisi/ukuran tersimpan selama aplikasi jalan
+        
+        # 2. Tampilkan Jendela (Non-Blocking)
+        self.help_window.show()
+        
+        # 3. Bawa ke depan (agar tidak tertutup main window jika sudah terbuka sebelumnya)
+        self.help_window.raise_()
+        self.help_window.activateWindow()
 
     def load_settings(self):
         last_in = self.settings.value("last_input_dir")
@@ -184,11 +261,7 @@ class MainWindow(QMainWindow):
     def on_table_double_click(self, row, col):
         if row < 0 or row >= len(self.data_cache): return
         
-        # Karena tabel mungkin di-sort, kita tidak bisa pakai index 'row' langsung ke self.data_cache
-        # Kita harus cari data yang sesuai dengan 'filename' di kolom 0 baris tersebut
         filename_in_table = self.table.item(row, 0).text()
-        
-        # Cari file di cache
         selected_file = None
         for item in self.data_cache:
             if item["filename"] == filename_in_table:
@@ -197,7 +270,6 @@ class MainWindow(QMainWindow):
         
         if not selected_file: return
 
-        # Tampilkan Konfirmasi
         reply = QMessageBox.question(self, "Edit File Input", 
                                      f"Apakah Anda ingin memodifikasi file ini?\n\n{selected_file['filename']}",
                                      QMessageBox.Yes | QMessageBox.No)
@@ -205,10 +277,8 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             file_path = selected_file["path"]
             if os.path.exists(file_path):
-                # Buka file (Excel/Default App)
                 success = QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
                 if not success:
-                    # Fallback: Buka Folder jika gagal buka file
                     folder = os.path.dirname(file_path)
                     QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
             else:

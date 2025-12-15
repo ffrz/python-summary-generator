@@ -110,7 +110,9 @@ class GeneratorWorker(QThread):
         
     def run(self):
         self.log_msg.emit("🚀 Memulai proses generate...")
-        valid_data = [d for d in self.data_list if d["status"] in ["OK", "DUPLIKAT"]]
+        raw_valid_data = [d for d in self.data_list if d["status"] in ["OK", "DUPLIKAT"]]
+        valid_data = raw_valid_data[:10]
+
         copied_count = 0
         created_paths = set()
         
@@ -145,22 +147,42 @@ class GeneratorWorker(QThread):
 
         # 2. GENERATE SUMMARY EXCEL
         try:
+            current_year = datetime.now().year
+
             self.log_msg.emit("📊 Membuat file summary...")
             wb = openpyxl.Workbook()
             ws = wb.active
-            ws.title = "PCM SUMMARY"
+            ws.title = f"PCM {current_year} SUMMARY"
             
             # --- A. SETUP JUDUL (Row 1) ---
-            current_year = datetime.now().year
-            ws['A1'] = f"PCM {current_year} SUMMARY"
-            ws['A1'].font = openpyxl.styles.Font(size=14, bold=True, name='Calibri')
+            # Judul digeser sedikit agar rapi (misal di kolom C)
+            ws['B1'] = f"PCM {current_year} SUMMARY" 
+            ws['B1'].font = openpyxl.styles.Font(size=14, bold=True, name='Calibri')
             
             # --- B. SETUP HEADER (Row 3) ---
+            # Total 21 Kolom (1 Kolom Baru + 20 Kolom Lama)
             headers = [
-                "No", "Project no.", "Busunit", "Proj date", "Cust name", "Ccy",
-                "Project value", "Kurs", "Proj IDR", "BARANG&JASA", "Penalty",
-                "Warranty", "Freight", "Cost (estd.)", "CM booked", "CR booked",
-                "CM IDR", "CM %", "COST %", "Ket."
+                "File name",      # Col 1 (A)
+                "No",             # Col 2 (B)
+                "Project no.",    # Col 3 (C)
+                "Busunit",        # Col 4 (D)
+                "Proj date",      # Col 5 (E)
+                "Cust name",      # Col 6 (F)
+                "Ccy",            # Col 7 (G)
+                "Project value",  # Col 8 (H)
+                "Kurs",           # Col 9 (I)
+                "Proj IDR",       # Col 10 (J)
+                "BARANG&JASA",    # Col 11 (K)
+                "Penalty",        # Col 12 (L)
+                "Warranty",       # Col 13 (M)
+                "Freight",        # Col 14 (N)
+                "Cost (estd.)",   # Col 15 (O)
+                "CM booked",      # Col 16 (P)
+                "CR booked",      # Col 17 (Q)
+                "CM IDR",         # Col 18 (R)
+                "CM %",           # Col 19 (S)
+                "COST %",         # Col 20 (T)
+                "Ket."            # Col 21 (U)
             ]
             
             header_font = openpyxl.styles.Font(bold=True, name='Calibri', size=11)
@@ -170,7 +192,7 @@ class GeneratorWorker(QThread):
             border_black = openpyxl.styles.Border(left=black_side, right=black_side, top=black_side, bottom=black_side)
             border_black_row = openpyxl.styles.Border(left=black_side, right=black_side)
             
-            duplicate_fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00") # Kuning untuk duplikat
+            duplicate_fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00") 
             
             header_row_idx = 3
             ws.append([]) # Row 2 Kosong
@@ -189,57 +211,93 @@ class GeneratorWorker(QThread):
             for idx, item in enumerate(valid_data, 1):
                 r = header_row_idx + idx # Row index di Excel
                 
-                # --- LOGIKA CURRENCY & KURS ---
+                # --- LOGIKA DATA ---
                 val_project = item["Project Value"]
                 val_ccy = item.get("Currency", "IDR")
                 
                 raw_kurs = item.get("Kurs", 1.0)
-                if val_ccy == "IDR":
-                    val_kurs = 1.0 
-                else:
-                    val_kurs = raw_kurs if raw_kurs else 1.0 
+                val_kurs = 1.0 if val_ccy == "IDR" else (raw_kurs if raw_kurs else 1.0)
                 
-                val_cost = f"=SUM(J{r}:M{r})"
                 val_cm = item["CM Booked"]
                 
-                # --- FIX DATE OBJECT ---
+                # --- FIX DATE ---
                 val_date = item.get("_sort_date", datetime.min)
                 if val_date == datetime.min:
                     val_date = item.get("Proj Date", "")
 
-                f_proj_idr = f"=G{r}*H{r}"                
+                # --- RUMUS EXCEL (GESER KOLOM +1 dari sebelumnya) ---
+                # H = Col 8 (Project Value), I = Col 9 (Kurs)
+                f_proj_idr = f"=H{r}*I{r}" 
+                
+                # K=11, L=12, M=13, N=14 -> Cost Estd = SUM(K:N)
+                val_cost = f"=SUM(K{r}:N{r})" 
+                
                 f_cr_booked = item["CR Booked"]
-                f_cm_idr = f"=I{r}-N{r}"
-                f_cm_pct = f"=IF(I{r}=0, 0, Q{r}/I{r})"
-                f_cost_pct = f"=IF(I{r}=0, 0, N{r}/I{r})"
+                
+                # J = 10 (Proj IDR), O = 15 (Cost), R = 18 (CM IDR)
+                # CM IDR = Proj IDR - Cost ?? atau CM Booked? -> Sesuai kode lama: CM IDR = J - O
+                # TAPI di kode lama f_cm_idr = I - N (Proj IDR - Cost).
+                # Sekarang Proj IDR = J, Cost = O. Jadi:
+                f_cm_idr = f"=J{r}-O{r}" 
+                
+                # CM % = CM IDR / Proj IDR -> R / J
+                f_cm_pct = f"=IF(J{r}=0, 0, R{r}/J{r})"
+                
+                # COST % = Cost / Proj IDR -> O / J
+                f_cost_pct = f"=IF(S{r}=0, 0, 1-S{r})"
                 
                 status_ket = ""
                 if item["status"] == "DUPLIKAT":
                     status_ket = "Duplikat Input"
 
+                # Mapping Data (Perhatikan urutan)
                 row_data = [
-                    idx, item["Project No"], "", val_date, item["Cust Name"], val_ccy,
-                    val_project, val_kurs, f_proj_idr, item["Sub Total"], item["Penalty"],
-                    item["Warranty"], 0, val_cost, val_cm, f_cr_booked, f_cm_idr,
-                    f_cm_pct, f_cost_pct, status_ket
+                    item["filename"],   # 1. Nama File Asli
+                    idx,                # 2. No
+                    item["Project No"], # 3. Project No
+                    "",                 # 4. Busunit
+                    val_date,           # 5. Proj Date
+                    item["Cust Name"],  # 6. Cust Name
+                    val_ccy,            # 7. Ccy
+                    val_project,        # 8. Project Value
+                    val_kurs,           # 9. Kurs
+                    f_proj_idr,         # 10. Proj IDR
+                    item["Sub Total"],  # 11. B&J
+                    item["Penalty"],    # 12. Penalty
+                    item["Warranty"],   # 13. Warranty
+                    0,                  # 14. Freight
+                    val_cost,           # 15. Cost Estd
+                    val_cm,             # 16. CM Booked
+                    f_cr_booked,        # 17. CR Booked
+                    f_cm_idr,           # 18. CM IDR
+                    f_cm_pct,           # 19. CM %
+                    f_cost_pct,         # 20. Cost %
+                    status_ket          # 21. Ket
                 ]
                 
                 ws.append(row_data)
                 
+                # Styling Baris
                 for c, val in enumerate(row_data, 1):
                     cell = ws.cell(row=r, column=c)
                     cell.border = border_black_row 
                     
-                    # Format Tanggal (Kolom 4) -> d-mmm-yy
-                    if c == 4:
+                    # Format Tanggal (Kolom 5)
+                    if c == 5:
                         cell.number_format = 'd-mmm-yy'
 
-                    if c in [7, 9, 10, 11, 12, 13, 14, 15, 17]: 
+                    # Format Ribuan (Kolom 8, 10-16, 18)
+                    if c in [8, 10, 11, 12, 13, 14, 15, 16, 18]: 
                         cell.number_format = '#,##0'
-                    if c == 8:
+                    
+                    # Format Kurs (Kolom 9)
+                    if c == 9:
                         cell.number_format = '#,##0.00'
-                    if c in [16, 18, 19]:
+                    
+                    # Format Persen (Kolom 17, 19, 20)
+                    if c in [17, 19, 20]:
                         cell.number_format = '0.00%'
+                        
                     if item["status"] == "DUPLIKAT":
                         cell.fill = duplicate_fill
 
@@ -250,11 +308,13 @@ class GeneratorWorker(QThread):
                 total_font = openpyxl.styles.Font(bold=True, name='Calibri', size=11)
                 total_border = openpyxl.styles.Border(top=black_side, bottom=openpyxl.styles.Side(style='medium', color="000000"))
                 
-                # Label GRAND TOTAL di kolom Ccy (6)
-                ws.cell(row=r_total, column=6, value="GRAND TOTAL").font = total_font
+                # Label GRAND TOTAL di kolom Ccy (Kolom 7)
+                ws.cell(row=r_total, column=7, value="GRAND TOTAL").font = total_font
                 
-                # Kolom yang akan di-SUM:
-                sum_cols = [7, 9, 10, 11, 12, 13, 14, 15, 17]
+                # Kolom yang akan di-SUM (Indeks Bergeser +1 dari kode lama)
+                # Lama: [7, 9, 10, 11, 12, 13, 14, 15, 17]
+                # Baru: [8, 10, 11, 12, 13, 14, 15, 16, 18]
+                sum_cols = [8, 10, 11, 12, 13, 14, 15, 16, 18]
                 
                 for c in range(1, len(headers) + 1):
                     cell = ws.cell(row=r_total, column=c)
@@ -265,7 +325,8 @@ class GeneratorWorker(QThread):
                         cell.value = sum_formula
                         cell.number_format = '#,##0'
                     
-                    if c != 6 and c not in sum_cols:
+                    # Styling Border (Kecuali kolom label Ccy = 7)
+                    if c != 7 and c not in sum_cols:
                          cell.border = openpyxl.styles.Border(top=black_side, bottom=openpyxl.styles.Side(style='medium', color="000000"))
                     else:
                          cell.border = total_border

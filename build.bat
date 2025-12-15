@@ -11,7 +11,16 @@ if exist "build" rmdir /s /q "build"
 echo Sedang memproses...
 pyinstaller pcm-summary-generator.spec --clean --noconfirm
 
-:: 3. Konfirmasi selesai
+echo [2/3] Menyalin User Manual...
+if exist "USER_MANUAL.txt" (
+    copy "USER_MANUAL.txt" "dist\USER_MANUAL.txt" >nul
+    echo     - Manual berhasil disalin.
+) else (
+    echo     [WARNING] File User Manual.txt tidak ditemukan di folder project!
+)
+
+
+:: 4. Konfirmasi selesai
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo [SUKSES] File .exe ada di folder 'dist'

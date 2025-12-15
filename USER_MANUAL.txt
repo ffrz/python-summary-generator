@@ -1,0 +1,82 @@
+================================================================
+BUKU PANDUAN PENGGUNA (USER MANUAL)
+PCM SUMMARY GENERATOR v1.0.0
+================================================================
+
+1. PENDAHULUAN
+----------------------------------------------------------------
+Aplikasi ini berfungsi untuk membantu Anda merekapitulasi data 
+Project Cost Management (PCM) secara otomatis. Aplikasi akan 
+membaca file-file Excel mentah, mengubah nama file agar standar, 
+dan membuat satu file Excel rekap (Summary) lengkap dengan 
+perhitungan total.
+
+2. FITUR UTAMA
+----------------------------------------------------------------
+- Membaca otomatis file Excel lama (.xls) dan baru (.xlsx).
+- Mendeteksi jika ada Nomor Project yang ganda (Duplikat).
+- Mengubah nama file secara otomatis menjadi: 
+  "PCM [No Project] [Tahun] [Customer].xlsx"
+- Membuat file Summary dengan total perhitungan (Grand Total).
+- Fitur double klil untuk membuka file asli dengan cepat.
+
+3. CARA PENGGUNAAN
+----------------------------------------------------------------
+
+LANGKAH 1: SIAPKAN FOLDER
+Pastikan Anda memiliki satu folder khusus yang berisi file-file 
+Excel PCM yang ingin direkap.
+
+LANGKAH 2: JALANKAN APLIKASI
+Buka file aplikasi (PCM Summary Generator.exe).
+
+LANGKAH 3: PILIH FOLDER INPUT
+- Klik tombol "1. Pilih Folder INPUT".
+- Cari dan pilih folder yang berisi file Excel mentah tadi.
+- Aplikasi akan otomatis memindai (scan) isi folder tersebut.
+- Tunggu hingga daftar file muncul di tabel.
+
+LANGKAH 4: CEK DAFTAR FILE (TABEL)
+Perhatikan warna pada tabel:
+- PUTIH : File Valid (Status OK). Siap diproses.
+- KUNING: File Duplikat. Artinya ada Project No yang sama. 
+          Aplikasi tetap akan memprosesnya, namun diberi tanda.
+- MERAH : File Error. Format tidak dikenali atau Project No kosong.
+
+*TIPS: Anda bisa klik dua kali (double click) pada baris tabel 
+untuk membuka file aslinya di Excel jika ingin melakukan edit.*
+
+LANGKAH 5: PILIH FOLDER OUTPUT
+- Klik tombol "2. Pilih Folder OUTPUT".
+- Pilih folder kosong tempat Anda ingin menyimpan hasil rekap.
+- Disarankan menggunakan folder baru agar tidak tercampur.
+
+LANGKAH 6: GENERATE
+- Jika tombol "3. GENERATE FILES" sudah menyala biru, klik tombol tersebut.
+- Tunggu hingga proses (Loading Bar) mencapai 100%.
+- Akan muncul pesan sukses. Anda bisa memilih "Yes" untuk langsung 
+  membuka folder hasil.
+
+4. HASIL OUTPUT
+----------------------------------------------------------------
+Di dalam folder Output, Anda akan menemukan:
+1. File-file Excel proyek yang sudah di-rename (ganti nama) dengan rapi.
+2. File bernama "PCM [TAHUN] SUMMARY.xlsx".
+
+File Summary berisi tabel rekapitulasi lengkap dengan:
+- Perhitungan Kurs otomatis (Jika mata uang asing).
+- Perhitungan Persentase (CM %, Cost %, dll).
+- Baris "GRAND TOTAL" di paling bawah yang menjumlahkan seluruh nilai.
+
+5. INFORMASI TAMBAHAN
+----------------------------------------------------------------
+- Jika Anda menambahkan file baru ke folder Input saat aplikasi 
+  sedang terbuka, aplikasi akan otomatis mendeteksi dan memperbarui 
+  daftar tabel.
+- Jangan lupa menutup file Excel yang sedang terbuka sebelum 
+  menekan tombol Generate agar tidak terjadi error.
+
+----------------------------------------------------------------
+Jika terjadi kendala, hubungi:
+Fahmi Fauzi Rahman (0853-1740-4760)
+================================================================
