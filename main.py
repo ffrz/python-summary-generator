@@ -6,11 +6,15 @@ import xlrd
 import openpyxl
 from datetime import datetime
 
+# --- LIBRARY WATCHDOG UNTUK MONITORING ---
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QLabel, QProgressBar, 
                                QTableWidget, QTableWidgetItem, QFileDialog, 
                                QMessageBox, QHeaderView, QAbstractItemView)
-from PySide6.QtCore import Qt, QThread, Signal, QSettings, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QSettings, QUrl, QTimer
 from PySide6.QtGui import QColor, QDesktopServices, QAction
 
 # ==========================================
@@ -175,7 +179,48 @@ def extract_dispatcher(filepath):
     return data
 
 # ==========================================
-# 2. WORKER THREAD (PREVIEW SCANNER + SORT + DEDUP)
+# 2. WATCHER THREAD (MONITORING)
+# ==========================================
+
+class FolderChangeHandler(FileSystemEventHandler):
+    def __init__(self, signal_emitter):
+        self.signal_emitter = signal_emitter
+
+    def on_any_event(self, event):
+        if event.is_directory: return
+        filename = os.path.basename(event.src_path)
+        if filename.startswith("~$"): return
+        if filename.lower().endswith(('.xls', '.xlsx')):
+            self.signal_emitter.emit()
+
+class WatcherThread(QThread):
+    folder_changed = Signal()
+
+    def __init__(self, folder_path):
+        super().__init__()
+        self.folder_path = folder_path
+        self.observer = None
+
+    def run(self):
+        self.observer = Observer()
+        event_handler = FolderChangeHandler(self.folder_changed)
+        try:
+            self.observer.schedule(event_handler, self.folder_path, recursive=False)
+            self.observer.start()
+            while not self.isInterruptionRequested():
+                self.msleep(500)
+        except:
+            pass
+        finally:
+            if self.observer:
+                self.observer.stop()
+                self.observer.join()
+
+    def stop(self):
+        self.requestInterruption()
+
+# ==========================================
+# 3. WORKER THREADS (SCANNER & GENERATOR)
 # ==========================================
 
 class PreviewWorker(QThread):
@@ -196,7 +241,7 @@ class PreviewWorker(QThread):
         total = len(all_files)
         results = []
         
-        # 1. PARSE SEMUA FILE
+        # 1. PARSE
         for i, filename in enumerate(all_files):
             path = os.path.join(self.folder_path, filename)
             data = extract_dispatcher(path)
@@ -219,13 +264,9 @@ class PreviewWorker(QThread):
                 if pid and id_counts.get(pid, 0) > 1:
                     item["status"] = "DUPLIKAT" 
         
-        # 3. SORTING BY DATE
+        # 3. SORTING BY DATE (DEFAULT)
         results.sort(key=lambda x: x.get("_sort_date", datetime.min))
         self.finished.emit(results)
-
-# ==========================================
-# 3. GENERATOR THREAD
-# ==========================================
 
 class GeneratorWorker(QThread):
     log_msg = Signal(str)
@@ -238,12 +279,11 @@ class GeneratorWorker(QThread):
         
     def run(self):
         self.log_msg.emit("🚀 Memulai proses generate...")
-        
         valid_data = [d for d in self.data_list if d["status"] in ["OK", "DUPLIKAT"]]
         copied_count = 0
         created_paths = set()
         
-        # 1. COPY & RENAME FILES
+        # 1. COPY & RENAME
         for item in valid_data:
             try:
                 old_path = item["path"]
@@ -258,7 +298,7 @@ class GeneratorWorker(QThread):
                 
                 counter = 1
                 while new_path in created_paths or os.path.exists(new_path) and new_path not in created_paths:
-                    if new_path not in created_paths: break
+                    if new_path not in created_paths: break # Overwrite existing file is OK
                     new_name = f"{base_name} ({counter}){ext}"
                     new_path = os.path.join(self.output_folder, new_name)
                     counter += 1
@@ -286,10 +326,7 @@ class GeneratorWorker(QThread):
             # Styles
             header_font = openpyxl.styles.Font(bold=True, color="FFFFFF")
             header_fill = openpyxl.styles.PatternFill("solid", fgColor="2196F3")
-            
-            # --- COLOR MARKING UNTUK OUTPUT (KUNING) ---
             duplicate_fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00") # Kuning
-            
             border = openpyxl.styles.Border(left=openpyxl.styles.Side(style='thin'), 
                                             right=openpyxl.styles.Side(style='thin'), 
                                             top=openpyxl.styles.Side(style='thin'), 
@@ -322,17 +359,14 @@ class GeneratorWorker(QThread):
                     cell.border = border
                     if c in [5, 7, 8, 9, 10, 11, 12, 13]: cell.number_format = '#,##0'
                     if c == 14: cell.number_format = '0.00%'
-                    
-                    # --- APPLY WARNA KUNING JIKA DUPLIKAT ---
-                    if item["status"] == "DUPLIKAT":
-                        cell.fill = duplicate_fill
+                    if item["status"] == "DUPLIKAT": cell.fill = duplicate_fill
 
             current_year = datetime.now().year
             summary_name = f"PCM SUMMARY {current_year}.xlsx"
             summary_path = os.path.join(self.output_folder, summary_name)
             
             wb.save(summary_path)
-            self.finished.emit(summary_path) # Return path summary
+            self.finished.emit(summary_path)
 
         except Exception as e:
             self.finished.emit(f"ERROR: {e}")
@@ -344,17 +378,15 @@ class GeneratorWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PCM Generator v1.0.0")
+        self.setWindowTitle(" PCM Summary Generator v1.0.0")
         self.resize(1000, 650)
-        
-        # Registry Settings (Untuk ingat folder terakhir)
         self.settings = QSettings("FahmiSoft", "PCMGenerator")
         
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         
-        # --- INPUT OUTPUT SELECTION ---
+        # --- IO ---
         grp_io = QWidget()
         layout_io = QVBoxLayout(grp_io)
         
@@ -382,6 +414,13 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(cols)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        
+        # --- FITUR SORTING ---
+        self.table.setSortingEnabled(True)
+        
+        # --- FITUR DOUBLE CLICK ---
+        self.table.cellDoubleClicked.connect(self.on_table_double_click)
+        
         layout.addWidget(self.table)
         
         # --- ACTION ---
@@ -394,39 +433,36 @@ class MainWindow(QMainWindow):
         h3.addWidget(self.progress); h3.addWidget(self.btn_gen)
         layout.addLayout(h3)
         
-        # --- STATUS BAR (NEW) ---
         self.setup_statusbar()
-        
         self.input_dir = ""; self.output_dir = ""; self.data_cache = []
         self.scan_worker = None; self.gen_worker = None
+        self.watcher_thread = None
+        
+        self.debounce_timer = QTimer()
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.setInterval(1500)
+        self.debounce_timer.timeout.connect(self.run_preview_scan)
 
-        # Load Last Settings
         self.load_settings()
 
     def setup_statusbar(self):
         status_bar = self.statusBar()
-        
-        # Kiri: Versi
-        lbl_version = QLabel("  PCM Summary Generator v. 1.0.0  ")
+        lbl_version = QLabel("PCM Summary Generator v 1.0.0")
         status_bar.addWidget(lbl_version)
-        
-        # Kanan: About
-        btn_about = QPushButton("About Application")
+        btn_about = QPushButton("About")
         btn_about.setFlat(True)
         btn_about.setStyleSheet("font-weight: bold; color: #555;")
         btn_about.clicked.connect(self.show_about_dialog)
         status_bar.addPermanentWidget(btn_about)
 
     def load_settings(self):
-        # Restore last input/output folder
         last_in = self.settings.value("last_input_dir")
         last_out = self.settings.value("last_output_dir")
-        
         if last_in and os.path.exists(last_in):
             self.input_dir = last_in
             self.lbl_input.setText(last_in)
-            self.run_preview_scan() # Auto scan jika ada history
-            
+            self.start_watcher()
+            self.run_preview_scan()
         if last_out and os.path.exists(last_out):
             self.output_dir = last_out
             self.lbl_output.setText(last_out)
@@ -438,7 +474,8 @@ class MainWindow(QMainWindow):
         if path:
             self.input_dir = path
             self.lbl_input.setText(path)
-            self.settings.setValue("last_input_dir", path) # Save setting
+            self.settings.setValue("last_input_dir", path)
+            self.start_watcher()
             self.run_preview_scan()
 
     def select_output(self):
@@ -447,10 +484,21 @@ class MainWindow(QMainWindow):
         if path:
             self.output_dir = path
             self.lbl_output.setText(path)
-            self.settings.setValue("last_output_dir", path) # Save setting
+            self.settings.setValue("last_output_dir", path)
             self.check_ready()
 
+    def start_watcher(self):
+        if self.watcher_thread: self.watcher_thread.stop(); self.watcher_thread.wait()
+        self.watcher_thread = WatcherThread(self.input_dir)
+        self.watcher_thread.folder_changed.connect(self.on_folder_change_detected)
+        self.watcher_thread.start()
+
+    def on_folder_change_detected(self):
+        self.statusBar().showMessage("🔍 Mendeteksi perubahan file... Menunggu...", 2000)
+        self.debounce_timer.start()
+
     def run_preview_scan(self):
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.btn_gen.setEnabled(False)
         self.scan_worker = PreviewWorker(self.input_dir)
@@ -485,7 +533,43 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, 4, make_item(fmt_val))
             self.table.setItem(r, 5, make_item(status))
         
+        self.table.setSortingEnabled(True)
         self.check_ready()
+        self.statusBar().showMessage(f"Scan selesai. Total {len(results)} file.", 3000)
+
+    # --- FITUR DOUBLE CLICK OPEN EXCEL ---
+    def on_table_double_click(self, row, col):
+        if row < 0 or row >= len(self.data_cache): return
+        
+        # Karena tabel mungkin di-sort, kita tidak bisa pakai index 'row' langsung ke self.data_cache
+        # Kita harus cari data yang sesuai dengan 'filename' di kolom 0 baris tersebut
+        filename_in_table = self.table.item(row, 0).text()
+        
+        # Cari file di cache
+        selected_file = None
+        for item in self.data_cache:
+            if item["filename"] == filename_in_table:
+                selected_file = item
+                break
+        
+        if not selected_file: return
+
+        # Tampilkan Konfirmasi
+        reply = QMessageBox.question(self, "Edit File Input", 
+                                     f"Apakah Anda ingin memodifikasi file ini?\n\n{selected_file['filename']}",
+                                     QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            file_path = selected_file["path"]
+            if os.path.exists(file_path):
+                # Buka file (Excel/Default App)
+                success = QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+                if not success:
+                    # Fallback: Buka Folder jika gagal buka file
+                    folder = os.path.dirname(file_path)
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+            else:
+                QMessageBox.warning(self, "Error", "File tidak ditemukan!")
 
     def check_ready(self):
         valid_count = sum(1 for d in self.data_cache if d["status"] in ["OK", "DUPLIKAT"])
@@ -496,7 +580,6 @@ class MainWindow(QMainWindow):
 
     def start_generation(self):
         if not self.output_dir: return
-
         try:
             files_in_output = [f for f in os.listdir(self.output_dir) if not f.startswith('.')]
             if files_in_output:
@@ -523,18 +606,14 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 100); self.progress.setValue(100); self.progress.setFormat("Selesai")
         self.btn_gen.setEnabled(True); self.btn_gen.setText("GENERATE SELESAI")
         
-        # Cek apakah result_msg berisi path (sukses) atau error
         if "ERROR:" in result_msg:
             QMessageBox.critical(self, "Gagal", result_msg)
         else:
-            # Sukses
             reply = QMessageBox.question(self, "Sukses", 
                                          f"Generate selesai!\nFile Summary:\n{result_msg}\n\n"
                                          "Buka folder output di Windows Explorer?",
                                          QMessageBox.Yes | QMessageBox.No)
-            
             if reply == QMessageBox.Yes:
-                # Buka Folder Output
                 QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_dir))
 
     def show_about_dialog(self):
@@ -554,7 +633,7 @@ class MainWindow(QMainWindow):
             "<li>xlrd (Excel Classic Support)</li>"
             "</ul>"
         )
-        QMessageBox.about(self, "About Application", info)
+        QMessageBox.about(self, "About", info)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
