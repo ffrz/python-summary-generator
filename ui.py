@@ -1,0 +1,279 @@
+import os
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, 
+                               QHBoxLayout, QPushButton, QLabel, QProgressBar, 
+                               QTableWidget, QTableWidgetItem, QFileDialog, 
+                               QMessageBox, QHeaderView, QAbstractItemView)
+from PySide6.QtCore import Qt, QSettings, QUrl, QTimer
+from PySide6.QtGui import QColor, QDesktopServices
+
+from workers import WatcherThread, PreviewWorker, GeneratorWorker
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("PCM Summary Generator v1.0.0")
+        self.resize(1000, 650)
+        self.settings = QSettings("FahmiSoft", "PCMGenerator")
+        
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        
+        # --- IO ---
+        grp_io = QWidget()
+        layout_io = QVBoxLayout(grp_io)
+        
+        h1 = QHBoxLayout()
+        self.lbl_input = QLabel("Input Folder: (Belum Dipilih)")
+        self.lbl_input.setStyleSheet("background: #e3f2fd; padding: 5px; border-radius: 4px;")
+        btn_input = QPushButton("1. Pilih Folder INPUT")
+        btn_input.clicked.connect(self.select_input)
+        h1.addWidget(self.lbl_input); h1.addWidget(btn_input)
+        
+        h2 = QHBoxLayout()
+        self.lbl_output = QLabel("Output Folder: (Belum Dipilih)")
+        self.lbl_output.setStyleSheet("background: #e8f5e9; padding: 5px; border-radius: 4px;")
+        btn_output = QPushButton("2. Pilih Folder OUTPUT")
+        btn_output.clicked.connect(self.select_output)
+        h2.addWidget(self.lbl_output); h2.addWidget(btn_output)
+        
+        layout_io.addLayout(h1); layout_io.addLayout(h2)
+        layout.addWidget(grp_io)
+        
+        # --- TABLE ---
+        self.table = QTableWidget()
+        cols = ["Nama File Asli", "Project ID", "Customer", "Date", "Nilai Project", "Status"]
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+        # --- PENGGANTI ---
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+
+        self.table.setColumnWidth(0, 300) 
+        self.table.setColumnWidth(1, 100) # Project ID
+        self.table.setColumnWidth(4, 150) # Nilai Project
+        
+        # --- FITUR SORTING ---
+        self.table.setSortingEnabled(True)
+        
+        # --- FITUR DOUBLE CLICK ---
+        self.table.cellDoubleClicked.connect(self.on_table_double_click)
+        
+        layout.addWidget(self.table)
+        
+        # --- ACTION ---
+        h3 = QHBoxLayout()
+        self.progress = QProgressBar()
+        self.btn_gen = QPushButton("3. GENERATE FILES")
+        self.btn_gen.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; padding: 10px; } QPushButton:disabled { background-color: #ccc; }")
+        self.btn_gen.setEnabled(False)
+        self.btn_gen.clicked.connect(self.start_generation)
+        h3.addWidget(self.progress); h3.addWidget(self.btn_gen)
+        layout.addLayout(h3)
+        
+        self.setup_statusbar()
+        self.input_dir = ""; self.output_dir = ""; self.data_cache = []
+        self.scan_worker = None; self.gen_worker = None
+        self.watcher_thread = None
+        
+        self.debounce_timer = QTimer()
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.setInterval(1500)
+        self.debounce_timer.timeout.connect(self.run_preview_scan)
+
+        self.load_settings()
+
+    def setup_statusbar(self):
+        status_bar = self.statusBar()
+        lbl_version = QLabel("   PCM Summary Generator v 1.0.0")
+        status_bar.addWidget(lbl_version)
+        btn_about = QPushButton("About")
+        btn_about.setFlat(True)
+        btn_about.setStyleSheet("font-weight: bold; color: #555;")
+        btn_about.clicked.connect(self.show_about_dialog)
+        status_bar.addPermanentWidget(btn_about)
+
+    def load_settings(self):
+        last_in = self.settings.value("last_input_dir")
+        last_out = self.settings.value("last_output_dir")
+        if last_in and os.path.exists(last_in):
+            self.input_dir = last_in
+            self.lbl_input.setText(last_in)
+            self.start_watcher()
+            self.run_preview_scan()
+        if last_out and os.path.exists(last_out):
+            self.output_dir = last_out
+            self.lbl_output.setText(last_out)
+            self.check_ready()
+
+    def select_input(self):
+        start_dir = self.input_dir if self.input_dir else ""
+        path = QFileDialog.getExistingDirectory(self, "Pilih Input Folder", start_dir)
+        if path:
+            self.input_dir = path
+            self.lbl_input.setText(path)
+            self.settings.setValue("last_input_dir", path)
+            self.start_watcher()
+            self.run_preview_scan()
+
+    def select_output(self):
+        start_dir = self.output_dir if self.output_dir else ""
+        path = QFileDialog.getExistingDirectory(self, "Pilih Output Folder", start_dir)
+        if path:
+            self.output_dir = path
+            self.lbl_output.setText(path)
+            self.settings.setValue("last_output_dir", path)
+            self.check_ready()
+
+    def start_watcher(self):
+        if self.watcher_thread: self.watcher_thread.stop(); self.watcher_thread.wait()
+        self.watcher_thread = WatcherThread(self.input_dir)
+        self.watcher_thread.folder_changed.connect(self.on_folder_change_detected)
+        self.watcher_thread.start()
+
+    def on_folder_change_detected(self):
+        self.statusBar().showMessage("🔍 Mendeteksi perubahan file... Menunggu...", 2000)
+        self.debounce_timer.start()
+
+    def run_preview_scan(self):
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self.btn_gen.setEnabled(False)
+        self.scan_worker = PreviewWorker(self.input_dir)
+        self.scan_worker.progress.connect(self.progress.setValue)
+        self.scan_worker.finished.connect(self.on_preview_done)
+        self.scan_worker.start()
+        
+    def on_preview_done(self, results):
+        self.data_cache = results
+        self.table.setRowCount(len(results))
+        for r, item in enumerate(results):
+            status = item["status"]
+            color = QColor(Qt.black)
+            bg_color = QColor(Qt.white)
+            
+            if status == "DUPLIKAT":
+                bg_color = QColor("#FFEB3B"); status = "DUPLIKAT (Diproses)"
+            elif status != "OK":
+                bg_color = QColor("#FFCDD2"); color = QColor(Qt.red)
+            
+            def make_item(text):
+                it = QTableWidgetItem(str(text))
+                it.setForeground(color); it.setBackground(bg_color)
+                return it
+
+            self.table.setItem(r, 0, make_item(item["filename"]))
+            self.table.setItem(r, 1, make_item(item.get("Project No", "-")))
+            self.table.setItem(r, 2, make_item(item.get("Cust Name", "-")))
+            self.table.setItem(r, 3, make_item(item.get("Proj Date", "-")))
+            val = item.get("Project Value", 0)
+            fmt_val = f"{val:,.0f}" if isinstance(val, (int, float)) else str(val)
+            self.table.setItem(r, 4, make_item(fmt_val))
+            self.table.setItem(r, 5, make_item(status))
+        
+        self.table.setSortingEnabled(True)
+        self.check_ready()
+        self.statusBar().showMessage(f"Scan selesai. Total {len(results)} file.", 3000)
+
+    # --- FITUR DOUBLE CLICK OPEN EXCEL ---
+    def on_table_double_click(self, row, col):
+        if row < 0 or row >= len(self.data_cache): return
+        
+        # Karena tabel mungkin di-sort, kita tidak bisa pakai index 'row' langsung ke self.data_cache
+        # Kita harus cari data yang sesuai dengan 'filename' di kolom 0 baris tersebut
+        filename_in_table = self.table.item(row, 0).text()
+        
+        # Cari file di cache
+        selected_file = None
+        for item in self.data_cache:
+            if item["filename"] == filename_in_table:
+                selected_file = item
+                break
+        
+        if not selected_file: return
+
+        # Tampilkan Konfirmasi
+        reply = QMessageBox.question(self, "Edit File Input", 
+                                     f"Apakah Anda ingin memodifikasi file ini?\n\n{selected_file['filename']}",
+                                     QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            file_path = selected_file["path"]
+            if os.path.exists(file_path):
+                # Buka file (Excel/Default App)
+                success = QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
+                if not success:
+                    # Fallback: Buka Folder jika gagal buka file
+                    folder = os.path.dirname(file_path)
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+            else:
+                QMessageBox.warning(self, "Error", "File tidak ditemukan!")
+
+    def check_ready(self):
+        valid_count = sum(1 for d in self.data_cache if d["status"] in ["OK", "DUPLIKAT"])
+        is_ready = bool(self.input_dir and self.output_dir and valid_count > 0)
+        self.btn_gen.setEnabled(is_ready)
+        if is_ready: self.btn_gen.setText(f"3. GENERATE ({valid_count} File Valid)")
+        else: self.btn_gen.setText("3. GENERATE (Menunggu Input/Output)")
+
+    def start_generation(self):
+        if not self.output_dir: return
+        try:
+            files_in_output = [f for f in os.listdir(self.output_dir) if not f.startswith('.')]
+            if files_in_output:
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Warning)
+                msg_box.setWindowTitle("Folder Output Tidak Kosong")
+                msg_box.setText(f"Folder Output berisi {len(files_in_output)} file/folder.")
+                msg_box.setInformativeText("File lama mungkin akan tertimpa.\nLanjutkan?")
+                btn_overwrite = msg_box.addButton("Lanjutkan (Overwrite)", QMessageBox.AcceptRole)
+                btn_cancel = msg_box.addButton("Batalkan", QMessageBox.RejectRole)
+                msg_box.exec()
+                if msg_box.clickedButton() == btn_cancel: return
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e)); return
+        
+        self.gen_worker = GeneratorWorker(self.data_cache, self.output_dir)
+        self.gen_worker.log_msg.connect(lambda s: self.progress.setFormat(s))
+        self.gen_worker.finished.connect(self.on_generation_finished)
+        self.progress.setValue(0); self.progress.setRange(0, 0)
+        self.btn_gen.setEnabled(False)
+        self.gen_worker.start()
+
+    def on_generation_finished(self, result_msg):
+        self.progress.setRange(0, 100); self.progress.setValue(100); self.progress.setFormat("Selesai")
+        self.btn_gen.setEnabled(True); self.btn_gen.setText("GENERATE ULANG")
+        
+        if "ERROR:" in result_msg:
+            QMessageBox.critical(self, "Gagal", result_msg)
+        else:
+            reply = QMessageBox.question(self, "Sukses", 
+                                         f"Generate selesai!\nFile Summary:\n{result_msg}\n\n"
+                                         "Buka folder output di Windows Explorer?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_dir))
+
+    def show_about_dialog(self):
+        info = (
+            "<h3>PCM Summary Generator</h3>"
+            "<p>Version: 1.0.0</p>"
+            "<p>Aplikasi untuk rekapitulasi otomatis Project Cost Management.</p>"
+            "<hr>"
+            "<p><b>Developer:</b> Fahmi Fauzi Rahman</p>"
+            "<p><b>Contact:</b> 0853-1740-4760</p>"
+            "<hr>"
+            "<p><b>Credits / Libraries Used:</b></p>"
+            "<ul>"
+            "<li>Python 3</li>"
+            "<li>PySide6 (Qt for Python)</li>"
+            "<li>openpyxl (Excel Modern Support)</li>"
+            "<li>xlrd (Excel Classic Support)</li>"
+            "</ul>"
+        )
+        QMessageBox.about(self, "About", info)
